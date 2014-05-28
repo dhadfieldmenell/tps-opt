@@ -1,0 +1,1 @@
+float* sqdistWrapper(float* x, float* y, int xdim, int ydim);

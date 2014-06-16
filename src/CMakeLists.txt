@@ -1,7 +1,6 @@
 # Append current NVCC flags by something, eg comput capability
 cmake_minimum_required(VERSION 2.8)
 
-
 project(tps-opt)
 include(boost-python.cmake)
 
@@ -17,14 +16,26 @@ set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} --gpu-architecture sm_20)
 
 set(CMAKE_CXX_FLAGS "-fPIC")
 
-CUDA_ADD_LIBRARY(cdist_lib cdist.cu)
+# CUDA_ADD_LIBRARY(cdist_lib cdist.cu)
 
 include_directories(${PYTHON_NUMPY_INCLUDE_DIR})
-target_link_libraries(cdist_lib /usr/local/cuda/lib64/libcudart.so)
+# target_link_libraries(cdist_lib /usr/local/cuda/lib64/libcudart.so)
 # add_executable(test_boost test_boost.cpp)
-boost_python_module(test_boost test_boost.cpp)
+# boost_python_module(test_boost test_boost.cpp)
 
-target_link_libraries(test_boost cdist_lib)
+# target_link_libraries(test_boost cdist_lib)
+
+# CUDA_ADD_EXECUTABLE(tps tps.cu)
+
+## template for cuda -> boost python
+CUDA_ADD_LIBRARY(tps_lib SHARED tps.cu)
+target_link_libraries(tps_lib /usr/local/cuda/lib64/libcudart.so)
+## necessary for cuBLAS
+target_link_libraries(tps_lib /usr/local/cuda/lib64/libcublas.so)
+boost_python_module(fastps fastps.cpp)
+target_link_libraries(fastps tps_lib)
+
+
 
 
 

@@ -20,6 +20,14 @@ template<> const char* type_traits<int>::npname = "int32";
 template<> const char* type_traits<double>::npname = "float64";
 template<> const char* type_traits<unsigned char>::npname = "uint8";
 
+template<typename T>
+T* getListPointer(const py::list& l){
+  py::ssize_t len = py::len(l);
+  T* retval = new T[len];
+  for(int i = 0; i < len; ++i) retval[i] = py::extract<T>(l[i]);
+  return retval;
+}
+
 template <typename T>
 T* getPointer(const py::object& arr) {
   long int i = py::extract<long int>(arr.attr("ctypes").attr("data"));

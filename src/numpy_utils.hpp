@@ -29,6 +29,13 @@ T* getListPointer(const py::list& l){
 }
 
 template <typename T>
+T* getGPUPointer(const py::object& arr) {
+  long int i = py::extract<long int>(arr.attr("ptr"));
+  T* p = (T*)i;
+  return p;
+}
+
+template <typename T>
 T* getPointer(const py::object& arr) {
   long int i = py::extract<long int>(arr.attr("ctypes").attr("data"));
   T* p = (T*)i;

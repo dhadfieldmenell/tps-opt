@@ -3,6 +3,7 @@
 from __future__ import division
 import numpy as np
 import scipy.spatial.distance as ssd
+import rapprentice
 from rapprentice.registration import loglinspace, ThinPlateSpline, fit_ThinPlateSpline
 import tps
 
@@ -59,7 +60,7 @@ def ab_cost(xyzrgb1, xyzrgb2):
     lab2 = rgb2lab(xyzrgb2[:,d:])
     cost = ssd.cdist(lab1[:,1:], lab2[:,1:], 'euclidean')
     return cost
-@profile
+# @profile
 def sinkhorn_balance_coeffs(prob_NM, normalize_iter):
     """
     Computes the coefficients to balance the matrix prob_NM. Similar to balance_matrix3. Column-normalization happens first.
@@ -150,7 +151,7 @@ def rpm_em_step(x_nd, y_md, l, T, rot_reg, prev_f, vis_cost_xy = None, outlierpr
 
     return f, corr_nm
 
-
+# @profile
 def tps_rpm_presolve(x_nd, y_md, solution_mats, n_iter = 50, lambda_init=10, lambda_final=0.1, T_init = .04, T_final = .00004, rot_reg = np.r_[1e-4, 1e-4, 1e-1], 
             plotting = False, plot_cb = None, outlierfrac = 1e-2, vis_cost_xy = None, em_iter = 2):
     """
@@ -183,7 +184,7 @@ def tps_rpm_presolve(x_nd, y_md, solution_mats, n_iter = 50, lambda_init=10, lam
     return f, corr_nm
 
 
-@profile
+# @profile
 def rpm_em_step_presolve(x_nd, y_md, (proj_mat, offset_mat), l, T,
                          prev_f, vis_cost_xy = None, outlierprior = 1e-2, K_nn = None,
                          normalize_iter = 20, T0 = .04, rot_reg = np.r_[1e-4, 1e-4, 1e-1]):
@@ -241,14 +242,11 @@ def rpm_em_step_presolve(x_nd, y_md, (proj_mat, offset_mat), l, T,
 
     return prev_f, corr_nm, xtarg_nd
 
-def fit_tps_presolve(f, x_na, xtarg_nd, proj_mat, offset_mat, d):
-    return f
-
 def main():
     import argparse, h5py, os
     import matplotlib.pyplot as plt
     from rapprentice import clouds, plotting_plt
-    import registration
+    from rapprentice import registration
     import time
     
     parser = argparse.ArgumentParser()
@@ -256,7 +254,7 @@ def main():
     parser.add_argument("--output_folder", type=str, default="")
     parser.add_argument("--plot_color", type=int, default=1)
     parser.add_argument("--proj", type=int, default=1, help="project 3d visualization into 2d")
-    parser.add_argument("--visual_prior", type=int, default=1)
+    parser.add_argument("--visual_prior", type=int, default=0) # setting to 1 breaks for now
     parser.add_argument("--plotting", type=int, default=1)
 
     args = parser.parse_args()
@@ -319,50 +317,7 @@ def main():
         for (cloud_key, target_cloud) in infile[str(i)]['target_clouds'].iteritems():
             target_cloud = downsample_cloud(target_cloud[()])
             target_clouds[i].append(target_cloud)
-    infile.close()
-    
-    # start_time = time.time()
-    # rpm_tps_costs = []
-    # rpm_tps_reg_cost = []
-    # for i in range(len(source_clouds)):
-    #     source_cloud = source_clouds[i]
-    #     for target_cloud in target_clouds[i]:
-    #         if args.visual_prior:
-    #             vis_cost_xy = ab_cost(source_cloud, target_cloud)
-    #         else:
-    #             vis_cost_xy = None
-    #         f, corr_nm = tps_rpm(source_cloud[:,:-3], target_cloud[:,:-3],
-    #                              vis_cost_xy = vis_cost_xy,
-    #                              plotting=args.plotting, plot_cb = plot_cb_gen(os.path.join(args.output_folder, str(i) + "_" + cloud_key + "_rpm") if args.output_folder else None,
-    #                                                                            args,
-    #                                                                            source_cloud[:,-3:],
-    #                                                                            target_cloud[:,-3:]))
-    #         rpm_tps_costs.append(f._cost)
-    #         rpm_tps_reg_cost.append(registration.tps_reg_cost(f))
-    # print "tps_rpm time elapsed", time.time() - start_time
-    
-    # start_time = time.time()
-    # rpm_bij_tps_costs = []
-    # rpm_bij_tps_reg_cost = []
-    # for i in range(len(source_clouds)):
-    #     source_cloud = source_clouds[i]
-    #     for target_cloud in target_clouds[i]:
-    #         if args.visual_prior:
-    #             vis_cost_xy = ab_cost(source_cloud, target_cloud)
-    #         else:
-    #             vis_cost_xy = None
-    #         x_nd = source_cloud[:,:3]
-    #         y_md = target_cloud[:,:3]
-    #         scaled_x_nd, _ = registration.unit_boxify(x_nd)
-    #         scaled_y_md, _ = registration.unit_boxify(y_md)
-    #         f,g = registration.tps_rpm_bij(scaled_x_nd, scaled_y_md, rot_reg=np.r_[1e-4, 1e-4, 1e-1], n_iter=50, reg_init=10, reg_final=.1, outlierfrac=1e-2, vis_cost_xy=vis_cost_xy,
-    #                                        plotting=args.plotting, plot_cb=plot_cb_bij_gen(os.path.join(args.output_folder, str(i) + "_" + cloud_key + "_rpm_bij") if args.output_folder else None,
-    #                                                                                        args,
-    #                                                                                        source_cloud[:,-3:],
-    #                                                                                        target_cloud[:,-3:]))
-    #         rpm_bij_tps_costs.append(f._cost)
-    #         rpm_bij_tps_reg_cost.append(registration.tps_reg_cost(f))
-    # print "tps_rpm_bij time elapsed", time.time() - start_time
+    infile.close()       
     
     start_time = time.time()
     rpm_cheap_tps_costs = []
@@ -377,7 +332,7 @@ def main():
             
             rpm_args = {'vis_cost_xy':vis_cost_xy,
                         'n_iter' : N_ITER_CHEAP,
-                        'em_iter': 5,
+                        'em_iter': 10,
                         'plotting' : args.plotting,
                         'plot_cb' : plot_cb_gen(os.path.join(args.output_folder, str(i) + "_" + cloud_key + "_rpm_bij") if args.output_folder else None,
                                                                                            args)}
@@ -385,44 +340,8 @@ def main():
 
             rpm_cheap_tps_costs.append(f._cost)
             rpm_cheap_tps_reg_cost.append(registration.tps_reg_cost(f))
-    print "tps_rpm_cheap time elapsed", time.time() - start_time
+    print "tps_rpm_cheap time elapsed", time.time() - start_time    
     
-
-
-    # start_time = time.time()
-    # rpm_bij_cheap_tps_costs = []
-    # rpm_bij_cheap_tps_reg_cost = []
-    # for i in range(len(source_clouds)):
-    #     source_cloud = source_clouds[i]
-    #     for target_cloud in target_clouds[i]:
-    #         if args.visual_prior:
-    #             vis_cost_xy = ab_cost(source_cloud, target_cloud)
-    #         else:
-    #             vis_cost_xy = None
-    #         x_nd = source_cloud[:,:3]
-    #         y_md = target_cloud[:,:3]
-    #         scaled_x_nd, _ = registration.unit_boxify(x_nd)
-    #         scaled_y_md, _ = registration.unit_boxify(y_md)
-    #         f,g = registration.tps_rpm_bij(scaled_x_nd, scaled_y_md, rot_reg=np.r_[1e-4, 1e-4, 1e-1], n_iter=10, vis_cost_xy=vis_cost_xy, # Note registration_cost_cheap in rope_qlearn has a different rot_reg
-    #                                        plotting=args.plotting, plot_cb=plot_cb_bij_gen(os.path.join(args.output_folder, str(i) + "_" + cloud_key + "_rpm_bij_cheap") if args.output_folder else None,
-    #                                                                                        args,
-    #                                                                                        source_cloud[:,-3:],
-    #                                                                                        target_cloud[:,-3:]))
-    #         rpm_bij_cheap_tps_costs.append(f._cost)
-    #         rpm_bij_cheap_tps_reg_cost.append(registration.tps_reg_cost(f))
-    # print "tps_rpm_bij_cheap time elapsed", time.time() - start_time
-    
-    # np.set_printoptions(suppress=True)
-    
-    # print ""
-    # print "tps_costs"
-    # print "rpm, bij, rpm_cheap, bij_cheap"
-    # print np.array([rpm_tps_costs, rpm_bij_tps_costs, rpm_cheap_tps_costs, rpm_bij_cheap_tps_costs]).T
-    
-    # print ""
-    # print "tps_reg_cost"
-    # print "rpm, bij, rpm_cheap, bij_cheap"
-    # print np.array([rpm_tps_reg_cost, rpm_bij_tps_reg_cost, rpm_cheap_tps_reg_cost, rpm_bij_cheap_tps_reg_cost]).T
 
 if __name__ == "__main__":
     main()

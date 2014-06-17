@@ -1,12 +1,11 @@
 import pycuda.gpuarray as gpuarray
-from scikits.cuda import misc, cublas, linalg
-import numpy as np
+from scikits.cuda import misc, cublas
 from string import lower, upper
 
 def dot_batch_nocheck(a_arr_gpu, b_arr_gpu, c_arr_gpu, a_ptr_gpu, b_ptr_gpu, c_ptr_gpu,
                       transa = 'N', transb = 'N', handle = None):
     """
-    Implementation of batched dot products using cuda
+    Implementation of batched dot products using cuda.    
 
     Parameters
     ----------
@@ -39,6 +38,7 @@ def dot_batch_nocheck(a_arr_gpu, b_arr_gpu, c_arr_gpu, a_ptr_gpu, b_ptr_gpu, c_p
     Notes
     -----
     The input matrices must all contain elements of the same data type.
+    All matrics in a list must have same size.
 
     Examples
     --------
@@ -155,13 +155,13 @@ def dot_batch_nocheck(a_arr_gpu, b_arr_gpu, c_arr_gpu, a_ptr_gpu, b_ptr_gpu, c_p
 
 if __name__ == '__main__':
     import pycuda.autoinit
-    from pycuda import gpuarray
     import numpy as np
     from scikits.cuda import linalg
     linalg.init()
-    a_arr = [np.asarray(np.random.rand(4, 2), np.float32) for i in range(10)]
-    b_arr = [np.asarray(np.random.rand(2, 2), np.float32) for i in range(10)]
-    c_arr = [np.asarray(np.random.rand(4, 2), np.float32) for i in range(10)]
+    N = 100
+    a_arr = [np.asarray(np.random.rand(4, 2), np.float32) for _ in range(N)]
+    b_arr = [np.asarray(np.random.rand(2, 2), np.float32) for _ in range(N)]
+    c_arr = [np.asarray(np.random.rand(4, 2), np.float32) for _ in range(N)]
     a_arr_gpu = [gpuarray.to_gpu(a_gpu) for a_gpu in a_arr]
     b_arr_gpu = [gpuarray.to_gpu(b_gpu) for b_gpu in b_arr]
     c_arr_gpu = [gpuarray.to_gpu(c_gpu) for c_gpu in c_arr]
@@ -170,7 +170,6 @@ if __name__ == '__main__':
     c_ptr_gpu = gpuarray.to_gpu(np.asarray([int(c_gpu.gpudata) for c_gpu in c_arr_gpu]))
     dot_batch_nocheck(a_arr_gpu, b_arr_gpu, c_arr_gpu, a_ptr_gpu, b_ptr_gpu, c_ptr_gpu)
     success = True
-    for i in range(10):
+    for i in range(N):
        success &= np.allclose(np.dot(a_arr[i], b_arr[i]) + c_arr[i], c_arr_gpu[i].get())
     print "Test Successful:\t{}".format(success)
-     

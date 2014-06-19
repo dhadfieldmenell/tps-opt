@@ -3,321 +3,300 @@
 from __future__ import division
 import numpy as np
 import scipy.spatial.distance as ssd
-import tps
 import h5py
 
-import pycuda.driver
+import pycuda.driver as drv
 import pycuda.autoinit
 from pycuda import gpuarray
 from scikits.cuda import linalg
 linalg.init()
+
+from tps import tps_kernel_matrix
+from transformations import unit_boxify
 from culinalg_exts import dot_batch_nocheck
+from precompute import get_sol_params, downsample_cloud
+from cuda_funcs import init_prob_nm, norm_prob_nm, get_targ_pts, check_cuda_err, fill_mat
 
 import IPython as ipy
+from pdb import pm, set_trace
+import time
 
 N_ITER_CHEAP = 10
-EM_ITER_CHEAP = 5
+EM_ITER_CHEAP = 1
 DEFAULT_LAMBDA = (10, .1)
 MAX_CLD_SIZE = 150
 DATA_DIM = 3
+DS_SIZE = 0.025
 
+class Globals:
+    sync = False
+
+def sync():
+    if Globals.sync:
+        check_cuda_err()
 
 def loglinspace(a,b,n):
     "n numbers between a to b (inclusive) with constant ratio between consecutive numbers"
     return np.exp(np.linspace(np.log(a),np.log(b),n))    
 
+def gpu_pad(x, shape, dtype=np.float32):
+    (m, n) = x.shape
+    if m > shape[0] or n > shape[1]:
+        raise ValueError("Cannot Pad Beyond Normal Dimension")
+    x_new = np.zeros(shape, dtype=dtype)    
+    x_new[:m, :n] = x
+    return gpuarray.to_gpu(x_new)
+
+def get_gpu_ptrs(arr, (m, n) = (0, 0)):
+    ptrs = [int(x[m:, n:].gpudata) for x in arr]
+    return gpuarray.to_gpu(np.array(ptrs))
+
+
 class GPUContext(object):
     """
     Class to contain GPU arrays
     """
-    def __init__(self, actionfile, bend_coeffs = None):
+    def __init__(self, bend_coeffs = None):
         if bend_coeffs is None:
             lambda_init, lambda_final = DEFAULT_LAMBDA
-            bend_coeffs = loglinspace(lambda_init, lambda_final, N_ITER_CHEAP)
+            bend_coeffs = np.around(loglinspace(lambda_init, lambda_final, N_ITER_CHEAP), 6)
         self.bend_coeffs = bend_coeffs
-        self.N = len(actionfile)
-        self.tps_params = None
-        self.proj_mats = None
-        self.offset_mats = None
-        self.src_pts = None
-        self.src_pts_warped = None
-        self.src_pts_targ = None
-        self.corr_nm = None
-        
-        
+        self.ptrs_valid = False
+        self.N = 0
 
-    def set_targ_cld(self, targ_cld_xyz):
+        self.tps_params     = []
+        self.tps_param_ptrs = None
+        self.trans_d        = []
+        self.trans_d_ptrs   = None
+        self.lin_dd         = []
+        self.lin_dd_ptrs    = None
+        self.w_nd           = []
+        self.w_nd_ptrs      = None
         """
-        does the initial computations so we can fit thin plate splines to
-        the target cloud
+        TPS PARAM FORMAT
+        [      np.zeros(DATA_DIM)      ]   [  trans_d  ]   [1 x d]
+        [       np.eye(DATA_DIM)       ] = [  lin_dd   ] = [d x d]
+        [np.zeros((np.zeros, DATA_DIM))]   [   w_nd    ]   [n x d]
         """
-        raise NotImplementedError
+        self.default_tps_params = gpuarray.zeros((DATA_DIM + 1 + MAX_CLD_SIZE, DATA_DIM), np.float32)
+        self.default_tps_params[1:DATA_DIM+1, :].set(np.eye(DATA_DIM, dtype=np.float32))
+
+        self.proj_mats       = dict([(b, []) for b in bend_coeffs])
+        self.proj_mat_ptrs   = dict([(b, None) for b in bend_coeffs])
+        self.offset_mats     = dict([(b, []) for b in bend_coeffs])
+        self.offset_mat_ptrs = dict([(b, None) for b in bend_coeffs])
+
+        self.pts             = []
+        self.pt_ptrs         = None
+        self.kernels         = []
+        self.kernel_ptrs     = None
+        self.pts_w           = []
+        self.pt_w_ptrs       = None
+        self.pts_t           = []
+        self.pts_t_ptrs      = None
+        self.dims            = []
+        self.dims_gpu        = None
+
+        self.corr_nm         = []
+        self.corr_nm_ptrs    = None
+        self.seg_names       = []
+
+    def reset_tps_params(self):
+        """
+        sets the tps params to be identity
+        """
+        for p in self.tps_params:
+            drv.memcpy_dtod_async(p.gpudata, self.default_tps_params.gpudata, p.mem_size)            
+    def set_tps_params(self, vals):
+        for d, s in zip(self.tps_params, vals):
+            drv.memcpy_dtod_async(d.gpudata, s.gpudata, d.mem_size)            
+
+    def add_cld(self, name, proj_mats, offset_mats, cloud_xyz, kernel, update_ptrs = False):
+        """
+        adds a new cloud to our context for batch processing
+        """
+        self.ptrs_valid = False
+        self.N += 1
+        self.seg_names.append(name)
+        self.tps_params.append(self.default_tps_params.copy())
+        self.trans_d.append(self.tps_params[-1][:1, :1])
+        self.lin_dd.append(self.tps_params[-1][1:DATA_DIM+1, :])
+        self.w_nd.append(self.tps_params[-1][DATA_DIM + 1:, :])
+        n = cloud_xyz.shape[0]
+        
+        for b in self.bend_coeffs:
+            proj_mat   = proj_mats[b]
+            offset_mat = offset_mats[b]
+            self.proj_mats[b].append(gpu_pad(proj_mat, (MAX_CLD_SIZE + DATA_DIM + 1, MAX_CLD_SIZE)))
+            if offset_mat.shape != (n + DATA_DIM + 1, DATA_DIM):
+                raise ValueError("Offset Matrix has incorrect dimension")
+            self.offset_mats[b].append(gpu_pad(offset_mat, (MAX_CLD_SIZE + DATA_DIM + 1, DATA_DIM)))
 
 
-def tps_rpm(x_nd, y_md, n_iter = 20, lambda_init = 10., lambda_final = .1, T_init = .04, T_final = .00004, rot_reg = np.r_[1e-4, 1e-4, 1e-1], 
-            plotting = False, plot_cb = None, outlierfrac = 1e-2, vis_cost_xy = None, em_iter = 2):
-    """
-    tps-rpm algorithm mostly as described by chui and rangaran
-    lambda_init/lambda_final: regularization on curvature
-    T_init/T_final: radius for correspondence calculation (meters)
-    plotting: 0 means don't plot. integer n means plot every n iterations
-    vis_cost_xy: matrix of pairwise costs between source and target points, based on visual features
-    Note: Pick a T_init that is about 1/10 of the largest square distance of all point pairs
-    """
-    _,d=x_nd.shape
-    lambdas = loglinspace(lambda_init, lambda_final, n_iter)
-    Ts = loglinspace(T_init, T_final, n_iter)
+        if n > MAX_CLD_SIZE or cloud_xyz.shape[1] != DATA_DIM:
+            raise ValueError("cloud_xyz has incorrect dimension")
+        self.pts.append(gpu_pad(cloud_xyz, (MAX_CLD_SIZE, DATA_DIM)))
+        if kernel.shape != (n, n):
+            raise ValueError("dimension mismatch b/t kernel and cloud")
+        self.kernels.append(gpu_pad(kernel, (MAX_CLD_SIZE, MAX_CLD_SIZE)))
+        self.dims.append(n)
 
-    f = ThinPlateSpline(d)
-    scale = (np.max(y_md,axis=0) - np.min(y_md,axis=0)) / (np.max(x_nd,axis=0) - np.min(x_nd,axis=0))
-    f.lin_ag = np.diag(scale).T # align the mins and max
-    f.trans_g = np.median(y_md,axis=0) - np.median(x_nd,axis=0) * scale  # align the medians
+        self.pts_w.append(gpuarray.zeros_like(self.pts[-1]))
+        self.pts_t.append(gpuarray.zeros_like(self.pts[-1]))
+        self.corr_nm.append(gpuarray.zeros((MAX_CLD_SIZE, MAX_CLD_SIZE), np.float32))
 
-    for i in xrange(n_iter):
-        for _ in xrange(em_iter):
-            f, corr_nm = rpm_em_step(x_nd, y_md, lambdas[i], Ts[i], rot_reg, f, vis_cost_xy = vis_cost_xy, T0 = T_init)
+        if update_ptrs:
+            self.update_ptrs()
 
-        if plotting and (i%plotting==0 or i==(n_iter-1)):
-            plot_cb(x_nd, y_md, corr_nm, f, i)
-    return f, corr_nm
+    def update_ptrs(self):
+        self.tps_param_ptrs = get_gpu_ptrs(self.tps_params)
+        self.trans_d_ptrs   = get_gpu_ptrs(self.trans_d)
+        self.lin_dd_ptrs    = get_gpu_ptrs(self.lin_dd)
+        self.w_nd_ptrs      = get_gpu_ptrs(self.w_nd)
+        
+        for b in self.bend_coeffs:
+            self.proj_mat_ptrs[b]   = get_gpu_ptrs(self.proj_mats[b])
+            self.offset_mat_ptrs[b] = get_gpu_ptrs(self.offset_mats[b])
+
+        self.pt_ptrs      = get_gpu_ptrs(self.pts)
+        self.kernel_ptrs  = get_gpu_ptrs(self.kernels)
+        self.pt_w_ptrs    = get_gpu_ptrs(self.pts_w)
+        self.pt_t_ptrs    = get_gpu_ptrs(self.pts_t)
+        self.corr_nm_ptrs = get_gpu_ptrs(self.corr_nm)
+        
+        self.dims_gpu = gpuarray.to_gpu(np.array(self.dims, dtype=np.int32))
+        self.ptrs_valid = True
+
+    def read_h5(self, fname):
+        f = h5py.File(fname, 'r')
+        for seg_name, seg_info in f.iteritems():
+            if 'inv' not in seg_info:
+                raise KeyError("H5 File does not have precomputed values")
+            seg_info = seg_info['inv']
+
+            proj_mats   = {}
+            offset_mats = {}
+            for b in self.bend_coeffs:
+                k = str(b)
+                if k not in seg_info:
+                    raise KeyError("H5 File {} bend coefficient {}".format(seg_name, k))
+                proj_mats[b] = seg_info[k]['proj_mat'][:]
+                offset_mats[b] = seg_info[k]['offset_mat'][:]
+
+            ds_key    = 'DS_SIZE_{}'.format(DS_SIZE)
+            cloud_xyz = seg_info[ds_key]['scaled_cloud_xyz']
+            kernel    = seg_info[ds_key]['scaled_K_nn']
+            self.add_cld(seg_name, proj_mats, offset_mats, cloud_xyz, kernel)
+        f.close()
+        self.update_ptrs()
+
+    def setup_tgt_ctx(self, cloud_xyz):
+        """
+        returns a GPUContext where all the clouds are cloud_xyz
+        and matched in length with this contex
+
+        assumes cloud_xyz is already downsampled and scaled
+        """
+        tgt_ctx = GPUContext(self.bend_coeffs)
+        K_nn = tps_kernel_matrix(cloud_xyz)
+        proj_mats   = {}
+        offset_mats = {}
+        for b in self.bend_coeffs:
+            _, res = get_sol_params(cloud_xyz, K_nn, b)
+            proj_mats[b]   = res['proj_mat']
+            offset_mats[b] = res['offset_mat']
+        for n in self.seg_names:
+            tgt_n = "y_{}".format(n)
+            tgt_ctx.add_cld(tgt_n, proj_mats, offset_mats, cloud_xyz, K_nn)
+        tgt_ctx.update_ptrs()
+        return tgt_ctx
+    # @profile
+    def transform_points(self):
+        """
+        computes the warp of self.pts under the current tps params
+        """
+        fill_mat(self.pt_w_ptrs, self.trans_d_ptrs, self.dims_gpu, self.N)
+        dot_batch_nocheck(self.pts,     self.lin_dd,      self.pts_w,
+                          self.pt_ptrs, self.lin_dd_ptrs, self.pt_w_ptrs) 
+        dot_batch_nocheck(self.kernels,      self.w_nd,      self.pts_w,
+                          self.kernel_ptrs, self.w_nd_ptrs,  self.pt_w_ptrs) 
+        sync()
+    # @profile
+    def get_target_points(self, other, outlierprior, outlierfrac, outliercutoff, T, norm_iters = 10):
+        """
+        computes the target points for self and other
+        using the current warped points for both                
+        """
+        init_prob_nm(self.pt_ptrs, other.pt_ptrs, 
+                     self.pt_w_ptrs, other.pt_w_ptrs, 
+                     self.dims_gpu, other.dims_gpu,
+                     self.N, outlierprior, T, self.corr_nm_ptrs)
+        sync()
+        norm_prob_nm(self.corr_nm_ptrs, self.dims_gpu, other.dims_gpu, self.N, outlierfrac, norm_iters)
+        sync()
+        get_targ_pts(self.pt_ptrs, other.pt_ptrs, 
+                     self.pt_w_ptrs, other.pt_w_ptrs, 
+                     self.corr_nm_ptrs, 
+                     self.dims_gpu, other.dims_gpu, 
+                     outliercutoff, self.N,
+                     self.pt_t_ptrs, other.pt_t_ptrs)
+        sync()
+    # @profile
+    def update_transform(self, b):
+        """
+        computes the TPS associated with the current target pts
+        """
+        self.set_tps_params(self.offset_mats[b])
+        dot_batch_nocheck(self.proj_mats[b],     self.pts_t,     self.tps_params,
+                          self.proj_mat_ptrs[b], self.pt_t_ptrs, self.tps_param_ptrs)
+        sync()
 # @profile
-def rpm_em_step(x_nd, y_md, l, T, rot_reg, prev_f, vis_cost_xy = None, outlierprior = 1e-2, normalize_iter = 20, T0 = .04):
-    n,d = x_nd.shape
-    m,_ = y_md.shape
-    xwarped_nd = prev_f.transform_points(x_nd)
-    
-    dist_nm = ssd.cdist(xwarped_nd, y_md, 'sqeuclidean')
-    outlier_dist_1m = ssd.cdist(xwarped_nd.mean(axis=0)[None,:], y_md, 'sqeuclidean')
-    outlier_dist_n1 = ssd.cdist(xwarped_nd, y_md.mean(axis=0)[None,:], 'sqeuclidean')
-
-    # Note: proportionality constants within a column can be ignored since Sinkorn balancing normalizes the columns first
-    prob_nm = np.exp( -(dist_nm / (2*T)) + (outlier_dist_1m / (2*T0)) ) / np.sqrt(T) # divide by np.exp( outlier_dist_1m / (2*T0) ) to prevent prob collapsing to zero
-    if vis_cost_xy != None:
-        pi = np.exp( -vis_cost_xy )
-        pi /= pi.sum(axis=0)[None,:] # normalize along columns; these are proper probabilities over j = 1,...,N
-        prob_nm *= (1. - outlierprior) * pi
-    else:
-        prob_nm *= (1. - outlierprior) / float(n)
-    outlier_prob_1m = outlierprior * np.ones((1,m)) / np.sqrt(T0) # divide by np.exp( outlier_dist_1m / (2*T0) )
-    outlier_prob_n1 = np.exp( -outlier_dist_n1 / (2*T0) ) / np.sqrt(T0)
-    prob_NM = np.empty((n+1, m+1), 'f4')
-    prob_NM[:n, :m] = prob_nm
-    prob_NM[:n, m][:,None] = outlier_prob_n1
-    prob_NM[n, :m][None,:] = outlier_prob_1m
-    prob_NM[n, m] = 0
-    
-    r_N, c_M = sinkhorn_balance_coeffs(prob_NM, normalize_iter)
-    prob_NM *= r_N[:,None]
-    prob_NM *= c_M[None,:]
-    # prob_NM needs to be row-normalized at this point
-    corr_nm = prob_NM[:n, :m]
-    
-    wt_n = corr_nm.sum(axis=1)
-
-    # set outliers to warp to their most recent warp targets
-    inlier = wt_n > 1e-2
-    xtarg_nd = np.empty(x_nd.shape)
-    xtarg_nd[inlier, :] = (corr_nm/wt_n[:,None]).dot(y_md)[inlier, :]
-    xtarg_nd[~inlier, :] = xwarped_nd[~inlier, :] 
-
-    f = fit_ThinPlateSpline(x_nd, xtarg_nd, bend_coef = l, wt_n = wt_n, rot_coef = rot_reg)
-    f._bend_coef = l
-    f._rot_coef = rot_reg
-    f._cost = tps.tps_cost(f.lin_ag, f.trans_g, f.w_ng, f.x_na, xtarg_nd, l, wt_n=wt_n)/wt_n.mean()
-
-    return f, corr_nm
-
-# @profile
-def tps_rpm_presolve(x_nd, y_md, solution_mats, n_iter = 50, lambda_init=10, lambda_final=0.1, T_init = .04, T_final = .00004, rot_reg = np.r_[1e-4, 1e-4, 1e-1], 
-            plotting = False, plot_cb = None, outlierfrac = 1e-2, vis_cost_xy = None, em_iter = 2):
+def batch_tps_rpm_bij(src_ctx, tgt_ctx, T_init = 4e-1, T_final = 4e-4, 
+                      outlierfrac = 1e-2, outlierprior = 1e-1, outliercutoff = 1e-2, em_iter = EM_ITER_CHEAP):
     """
-    tps-rpm algorithm mostly as described by chui and rangaran
-    lambda_init/lambda_final: regularization on curvature
-    T_init/T_final: radius for correspondence calculation (meters)
-    plotting: 0 means don't plot. integer n means plot every n iterations
-    vis_cost_xy: matrix of pairwise costs between source and target points, based on visual features
-    Note: Pick a T_init that is about 1/10 of the largest square distance of all point pairs
+    computes tps rpm for the clouds in src and tgt in batch
+    TODO: Fill out comment cleanly
     """
-    _,d=x_nd.shape
-    #presolve uses 6 decimals of precision for bends
-    lambdas = np.around(loglinspace(lambda_init, lambda_final, n_iter), 6)
-    Ts = loglinspace(T_init, T_final, n_iter)
+    ##TODO: add check to ensure that src_ctx and tgt_ctx are formatted properly
+    n_iter = len(src_ctx.bend_coeffs)
+    T_vals = loglinspace(T_init, T_final, n_iter
+)
+    src_ctx.reset_tps_params()
+    tgt_ctx.reset_tps_params()
+    for i, b in enumerate(src_ctx.bend_coeffs):
+        print "Iteration {}".format(i)
+        T = T_vals[i]
+        for _ in range(em_iter):
+            src_ctx.transform_points()
+            tgt_ctx.transform_points()
 
-    f = ThinPlateSpline(d)
-    scale = (np.max(y_md,axis=0) - np.min(y_md,axis=0)) / (np.max(x_nd,axis=0) - np.min(x_nd,axis=0))
-    f.lin_ag = np.diag(scale).T # align the mins and max
-    f.trans_g = np.median(y_md,axis=0) - np.median(x_nd,axis=0) * scale  # align the medians
+            src_ctx.get_target_points(tgt_ctx, outlierprior, outlierfrac, outliercutoff, T)
 
-    K_nn = -ssd.cdist(x_nd, x_nd)
+            src_ctx.update_transform(b)
+            tgt_ctx.update_transform(b)
 
-    for i in xrange(n_iter):
-        for _ in xrange(em_iter):
-            f, corr_nm, xtarg_nd = rpm_em_step_presolve(x_nd, y_md, solution_mats[str(lambdas[i])], lambdas[i], Ts[i], f, K_nn = K_nn, rot_reg = rot_reg, vis_cost_xy = vis_cost_xy, T0 = T_init)
-
-        if plotting and (i%plotting==0 or i==(n_iter-1)):
-            plot_cb(x_nd, y_md, corr_nm, f, i)
-    f._cost = tps.tps_cost(f.lin_ag, f.trans_g, f.w_ng, f.x_na, xtarg_nd, lambdas[i])
-    return f, corr_nm
-
-
-# @profile
-def rpm_em_step_presolve(x_nd, y_md, (proj_mat, offset_mat), l, T,
-                         prev_f, vis_cost_xy = None, outlierprior = 1e-2, K_nn = None,
-                         normalize_iter = 20, T0 = .04, rot_reg = np.r_[1e-4, 1e-4, 1e-1]):
-    n,d = x_nd.shape
-    m,_ = y_md.shape
-    lin_ag, trans_g, w_ng = prev_f.lin_ag, prev_f.trans_g, prev_f.w_ng
-    if K_nn == None:
-        K_nn = -ssd.cdist(x_nd, x_nd)
-    if w_ng.shape[0]:
-        xwarped_nd = np.dot(K_nn, w_ng) + np.dot(x_nd, lin_ag) + trans_g[None,:]
-    else:
-        xwarped_nd = np.dot(x_nd, lin_ag) + trans_g[None,:]
-    
-    dist_nm = ssd.cdist(xwarped_nd, y_md, 'sqeuclidean')
-    outlier_dist_1m = ssd.cdist(xwarped_nd.mean(axis=0)[None,:], y_md, 'sqeuclidean')
-    outlier_dist_n1 = ssd.cdist(xwarped_nd, y_md.mean(axis=0)[None,:], 'sqeuclidean')
-
-    # Note: proportionality constants within a column can be ignored since Sinkorn balancing normalizes the columns first
-    prob_nm = np.exp( -(dist_nm / (2*T)) + (outlier_dist_1m / (2*T0)) ) / np.sqrt(T) # divide by np.exp( outlier_dist_1m / (2*T0) ) to prevent prob collapsing to zero
-    if vis_cost_xy != None:
-        pi = np.exp( -vis_cost_xy )
-        pi /= pi.sum(axis=0)[None,:] # normalize along columns; these are proper probabilities over j = 1,...,N
-        prob_nm *= (1. - outlierprior) * pi
-    else:
-        prob_nm *= (1. - outlierprior) / float(n)
-    outlier_prob_1m = outlierprior * np.ones((1,m)) / np.sqrt(T0) # divide by np.exp( outlier_dist_1m / (2*T0) )
-    outlier_prob_n1 = np.exp( -outlier_dist_n1 / (2*T0) ) / np.sqrt(T0)
-    prob_NM = np.empty((n+1, m+1), 'f4')
-    prob_NM[:n, :m] = prob_nm
-    prob_NM[:n, m][:,None] = outlier_prob_n1
-    prob_NM[n, :m][None,:] = outlier_prob_1m
-    prob_NM[n, m] = 0
-    
-    r_N, c_M = sinkhorn_balance_coeffs(prob_NM, normalize_iter)
-    prob_NM *= r_N[:,None]
-    prob_NM *= c_M[None,:]
-    # prob_NM needs to be row-normalized at this point
-    corr_nm = prob_NM[:n, :m]
-    
-    wt_n = corr_nm.sum(axis=1)
-
-    # set outliers to warp to their most recent warp targets
-    inlier = wt_n > 1e-2
-    xtarg_nd = np.empty(x_nd.shape)
-    xtarg_nd[inlier, :] = (corr_nm/wt_n[:,None]).dot(y_md)[inlier, :]
-    xtarg_nd[~inlier, :] = xwarped_nd[~inlier, :] 
-
-    # f = fit_ThinPlateSpline(x_nd, xtarg_nd, bend_coef = l, wt_n = wt_n, rot_coef = rot_reg) # old fitting code
-    theta = proj_mat.dot(xtarg_nd) - offset_mat
-    prev_f.lin_ag, prev_f.trans_g, prev_f.w_ng = theta[1:d+1], theta[0], theta[d+1:]
-    prev_f.x_na = x_nd
-
-    prev_f._bend_coeprev_f = l
-    prev_f._rot_coef = rot_reg
-
-    return prev_f, corr_nm, xtarg_nd
+def parse_arguments():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input_file", type=str, default='../data/actions.h5')
+    parser.add_argument("--sync", action='store_true')
+    return parser.parse_args()
 
 def main():
-    import argparse, h5py, os
-    import matplotlib.pyplot as plt
-    from rapprentice import clouds, plotting_plt
-    from rapprentice import registration
-    import time
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument("input_file", type=str)
-    parser.add_argument("--output_folder", type=str, default="")
-    parser.add_argument("--plot_color", type=int, default=1)
-    parser.add_argument("--proj", type=int, default=1, help="project 3d visualization into 2d")
-    parser.add_argument("--visual_prior", type=int, default=0) # setting to 1 breaks for now
-    parser.add_argument("--plotting", type=int, default=1)
-
-    args = parser.parse_args()
-    
-    # TODO use PCL's downsampling for color as well
-    DS_SIZE = 0.025
-    def downsample_cloud(cloud):
-        # cloud should have XYZRGB info per row
-        d = 3
-        cloud_xyz = cloud[:,:d]
-        cloud_xyz_downsamp = clouds.downsample(cloud_xyz, DS_SIZE)
-        new_n,_ = cloud_xyz_downsamp.shape
-        dists = ssd.cdist(cloud_xyz_downsamp, cloud_xyz)
-        min_indices = dists.argmin(axis=1)
-        cloud_xyzrgb_downsamp = np.zeros((new_n,d+3))
-        cloud_xyzrgb_downsamp[:,:d] = cloud_xyz_downsamp
-        cloud_xyzrgb_downsamp[:,d:] = cloud[min_indices,d:]
-        return cloud_xyzrgb_downsamp
-
-    def plot_cb_gen(output_prefix, args, x_color= None, y_color=None):
-        def plot_cb(x_nd, y_md, corr_nm, f, iteration):
-            if args.plot_color:
-                plotting_plt.plot_tps_registration(x_nd, y_md, f, x_color = x_color, y_color = y_color, proj_2d=args.proj)
-            else:
-                plotting_plt.plot_tps_registration(x_nd, y_md, f, proj_2d=args.proj)
-            # save plot to file
-            if output_prefix is not None:
-                plt.savefig(output_prefix + "_iter" + str(iteration) + '.png')
-        return plot_cb
-
-    def plot_cb_bij_gen(output_prefix, args, x_color=None, y_color=None):
-        def plot_cb_bij(x_nd, y_md, xtarg_nd, corr_nm, wt_n, f):
-            if args.plot_color:
-                plotting_plt.plot_tps_registration(x_nd, y_md, f, res = (.3, .3, .12), x_color = x_color, y_color = y_color, proj_2d=args.proj)
-            else:
-                plotting_plt.plot_tps_registration(x_nd, y_md, f, res = (.4, .3, .12), proj_2d=args.proj)
-            # save plot to file
-            if output_prefix is not None:
-                plt.savefig(output_prefix + "_iter" + str(iteration) + '.png')
-        return plot_cb_bij
-
-    # preprocess and downsample clouds
-    infile = h5py.File(args.input_file)
-    source_clouds = {}
-    target_clouds = {}
-    solution_mats = {}
-    lambda_init = 10
-    lambda_final = .1
-    lambdas = np.around(loglinspace(lambda_init, lambda_final, N_ITER_CHEAP), 6)    
-
-    for i in range(len(infile)):
-        source_cloud = infile[str(i)]['inv']['DS_SIZE_{}'.format(DS_SIZE)][:]
-        solution_mats[i] = {}
-        for l in lambdas:
-            proj_mat = infile[str(i)]['inv'][str(l)]['proj_mat'][:]
-            offset_mat = infile[str(i)]['inv'][str(l)]['offset_mat'][:]
-            solution_mats[i][str(l)] = (proj_mat, offset_mat)
-        source_clouds[i] = source_cloud
-        target_clouds[i] = []
-        for (cloud_key, target_cloud) in infile[str(i)]['target_clouds'].iteritems():
-            target_cloud = downsample_cloud(target_cloud[()])
-            target_clouds[i].append(target_cloud)
-    infile.close()       
-    
-    start_time = time.time()
-    rpm_cheap_tps_costs = []
-    rpm_cheap_tps_reg_cost = []
-    for i in range(len(source_clouds)):
-        source_cloud = source_clouds[i]
-        for target_cloud in target_clouds[i]:
-            if args.visual_prior:
-                vis_cost_xy = ab_cost(source_cloud, target_cloud)
-            else:
-                vis_cost_xy = None
-            
-            rpm_args = {'vis_cost_xy':vis_cost_xy,
-                        'n_iter' : N_ITER_CHEAP,
-                        'em_iter': 10,
-                        'plotting' : args.plotting,
-                        'plot_cb' : plot_cb_gen(os.path.join(args.output_folder, str(i) + "_" + cloud_key + "_rpm_bij") if args.output_folder else None,
-                                                                                           args)}
-            f, corr_nm = tps_rpm_presolve(source_cloud[:,:], target_cloud[:,:-3], solution_mats[i], **rpm_args)
-
-            rpm_cheap_tps_costs.append(f._cost)
-            rpm_cheap_tps_reg_cost.append(registration.tps_reg_cost(f))
-    print "tps_rpm_cheap time elapsed", time.time() - start_time    
-    
+    args = parse_arguments()
+    Globals.sync = args.sync
+    src_ctx = GPUContext()
+    src_ctx.read_h5(args.input_file)
+    f = h5py.File(args.input_file, 'r')    
+    tgt_cld = downsample_cloud(f['demo1-seg00']['cloud_xyz'][:])
+    f.close()
+    scaled_tgt_cld, _ = unit_boxify(tgt_cld)
+    for i in range(20):
+        tgt_ctx = src_ctx.setup_tgt_ctx(scaled_tgt_cld)
+        start = time.time()
+        batch_tps_rpm_bij(src_ctx, tgt_ctx)
+        tgt_ctx.pts[0].get()
+        print "Batch Computation Complete, Time Taken is {}".format(time.time() - start)
 
 if __name__ == "__main__":
     main()

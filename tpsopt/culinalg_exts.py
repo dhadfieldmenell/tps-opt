@@ -1,6 +1,7 @@
 import pycuda.gpuarray as gpuarray
 from scikits.cuda import misc, cublas
 from string import lower, upper
+import numpy as np
 
 def dot_batch_nocheck(a_arr_gpu, b_arr_gpu, c_arr_gpu, a_ptr_gpu, b_ptr_gpu, c_ptr_gpu,
                       transa = 'N', transb = 'N', handle = None):

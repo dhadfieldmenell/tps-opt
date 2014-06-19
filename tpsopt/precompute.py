@@ -5,10 +5,15 @@ import scipy.spatial.distance as ssd
 import argparse
 
 from tps import tps_kernel_matrix 
-from tps_registration import loglinspace
+from transformations import unit_boxify
 from rapprentice import clouds, plotting_plt
 
 import IPython as ipy
+
+def loglinspace(a,b,n):
+    "n numbers between a to b (inclusive) with constant ratio between consecutive numbers"
+    return np.exp(np.linspace(np.log(a),np.log(b),n))    
+
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('datafile', type=str)
@@ -20,15 +25,13 @@ def parse_arguments():
     parser.add_argument('--cloud_name', type=str, default='cloud_xyz')
     return parser.parse_args()
 
-def get_inv(x_na, bend_coef, rot_coef=np.r_[1e-4, 1e-4, 1e-1]):
+def get_sol_params(x_na, K_nn, bend_coef, rot_coef=np.r_[1e-4, 1e-4, 1e-1]):
     """
     precomputes the linear operators to solve this linear system. 
     only dependence on data is through the specified targets
 
     all thats needed is to compute the righthand side and do a forward solve
     """
-    x_na, scale_params = unit_boxify(x_na)
-    K_nn = tps_kernel_matrix(x_na)
     n,d = x_na.shape
     Q = np.c_[np.ones((n,1)), x_na, K_nn]
     # QWQ = Q.T.dot(WQ)
@@ -62,10 +65,7 @@ def get_inv(x_na, bend_coef, rot_coef=np.r_[1e-4, 1e-4, 1e-1]):
                 'offset_mat' : offset_mat, 
                 'h_inv': h_inv, 
                 'N' : N, 
-                'rot_coefs' : rot_coefs, 
-                'kernel' : K_nn, 
-                'scaled_cloud_xyz' : x_na, 
-                'scale_params' : scale_params}
+                'rot_coefs' : rot_coefs}
 
     return bend_coef, res_dict
 
@@ -92,17 +92,25 @@ def main():
             inv_group = seg_info.create_group('inv')
         ds_key = 'DS_SIZE_{}'.format(DS_SIZE)
         if ds_key in inv_group:
-            x_na = inv_group[ds_key][:]
+            scaled_x_na = inv_group[ds_key]['scaled_cloud_xyz'][:]
+            K_nn = inv_group[ds_key]['scaled_K_nn'][:]
         else:
+            ds_g = inv_group.create_group(ds_key)
             x_na = downsample_cloud(seg_info[args.cloud_name][:, :])
-            inv_group[ds_key] = x_na
+            scaled_x_na, scale_params = unit_boxify(x_na)
+            K_nn = tps_kernel_matrix(scaled_x_na)
+            ds_g['cloud_xyz'] = x_na
+            ds_g['scaled_cloud_xyz'] = scaled_x_na
+            ds_g['scaling'] = scale_params[0]
+            ds_g['scaled_translation'] = scale_params[1]
+            ds_g['scaled_K_nn'] = K_nn
 
         for bend_coef in bend_coefs:
             if str(bend_coef) in inv_group:
                 continue
             
             bend_coef_g = inv_group.create_group(str(bend_coef))
-            _, res = get_inv(x_na, bend_coef)
+            _, res = get_sol_params(scaled_x_na, K_nn, bend_coef)
             for k, v in res.iteritems():
                 bend_coef_g[k] = v
 

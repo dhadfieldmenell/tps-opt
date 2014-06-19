@@ -167,17 +167,16 @@ __global__ void _normProbNM(float* prob_nm, int* xdims_all, int* ydims_all,
 __global__ void _getTargPts(float* x, float* y, float* xw, float*yw,
 			    float* prob_nm, int* xdims, int* ydims, float cutoff,
 			    int stride, int N, float* xt, float* yt){
-  /*  row - column normalizes prob_nm
+  /*  Computes the target points for x and y when warped
    *  Launch with 1 block per item
    *  Thread.idx governs which row/column we are dealing with
    *  Assumed to have more than 4 threads
    *  
-   *  1. Copies prob_nm, ydims, xdims, into shared memory
-   *  2. Norm rows, detect outliers, 
-   *  3. Norm rows
-   *  4. Sum Columns
-   *  5. Norm Colums -- repeat
-   *  NOTE: Target Values Stored in Column Major Order!!
+   *  1. set up shared memory
+   *  2. Norm rows of corr, detect source outliers
+   *  3. Update xt with correct value (0 pad other areas
+   *  4. Norm cols of corr, detect target outliers
+   *  5. Update yt with correct value (0 pad other areas
    */
   __shared__ int xdim, ydim, nm_offset, d_offset, nm_stride;
   int tix = threadIdx.x; int bix = blockIdx.x;
@@ -197,7 +196,7 @@ __global__ void _getTargPts(float* x, float* y, float* xw, float*yw,
     if (r_sum < cutoff){      
       // printf("Block %i Row %i is an outlier\n", bix, tix);
       for(int i = 0; i < DATA_DIM; ++i){	
-    	xt[cMInd(d_offset, tix, i, stride)] = xw[rMInd(d_offset, tix, i, DATA_DIM)];
+    	xt[rMInd(d_offset, tix, i, DATA_DIM)] = xw[rMInd(d_offset, tix, i, DATA_DIM)];
       }
     } else {
       for(int i = 0; i < DATA_DIM; ++i){
@@ -206,12 +205,12 @@ __global__ void _getTargPts(float* x, float* y, float* xw, float*yw,
     	  targ = targ + prob_nm[rMInd(nm_offset, tix, j, nm_stride)] 
     	    * y[rMInd(d_offset, j, i, DATA_DIM)] / r_sum;
     	}
-    	xt[cMInd(d_offset, tix, i, stride)] = targ;
+    	xt[rMInd(d_offset, tix, i, DATA_DIM)] = targ;
       }
     }
   } else if (tix < stride){
     for(int i = 0; i < DATA_DIM; ++i){
-      ind = cMInd(d_offset, tix, i, stride);
+      ind = rMInd(d_offset, tix, i, DATA_DIM);
       xt[ind] = 0;
     }
   }
@@ -222,7 +221,7 @@ __global__ void _getTargPts(float* x, float* y, float* xw, float*yw,
     }
     if (c_sum < cutoff){
       for(int i = 0; i < DATA_DIM; ++i){
-  	yt[cMInd(d_offset, tix, i, stride)] = yw[rMInd(d_offset, tix, i, DATA_DIM)];
+  	yt[rMInd(d_offset, tix, i, DATA_DIM)] = yw[rMInd(d_offset, tix, i, DATA_DIM)];
       }
     } else {
       for(int i = 0; i < DATA_DIM; ++i){
@@ -231,12 +230,12 @@ __global__ void _getTargPts(float* x, float* y, float* xw, float*yw,
   	  targ = targ + prob_nm[rMInd(nm_offset, j, tix, nm_stride)] 
   	    * x[rMInd(d_offset, j, i, DATA_DIM)] / c_sum;
   	}
-  	yt[cMInd(d_offset, tix, i, stride)] = targ;
+  	yt[rMInd(d_offset, tix, i, DATA_DIM)] = targ;
       }
     }
   } else if (tix < stride){
     for(int i = 0; i < DATA_DIM; ++i){
-      ind = cMInd(d_offset, tix, i, stride);
+      ind = rMInd(d_offset, tix, i, DATA_DIM);
       yt[ind] = 0;
     }
   }

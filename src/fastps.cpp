@@ -24,12 +24,12 @@ void pyInitProbNM(py::object x, py::object y, py::object xw, py::object yw,
   /*
    * Initilialized correspondence matrix returned in corr
    */
-  float* x_ptr = getGPUPointer<float>(x);
-  float* xw_ptr = getGPUPointer<float>(xw);
+  float* x_ptr   = getGPUPointer<float>(x);
+  float* xw_ptr  = getGPUPointer<float>(xw);
   int* xdims_ptr = getGPUPointer<int>(xdims);
 
-  float* y_ptr = getGPUPointer<float>(y);
-  float* yw_ptr = getGPUPointer<float>(yw);
+  float* y_ptr   = getGPUPointer<float>(y);
+  float* yw_ptr  = getGPUPointer<float>(yw);
   int* ydims_ptr = getGPUPointer<int>(ydims);
 
   float* corr_ptr = getGPUPointer<float>(corr);
@@ -42,8 +42,8 @@ void pyNormProbNM(py::object corr, py::object xdims, py::object ydims,
 			int N, int stride, float outlier_frac, int norm_iters){
 
   float* corr_ptr = getGPUPointer<float>(corr);
-  int* xdims_ptr = getGPUPointer<int>(xdims);
-  int* ydims_ptr = getGPUPointer<int>(ydims);
+  int* xdims_ptr  = getGPUPointer<int>(xdims);
+  int* ydims_ptr  = getGPUPointer<int>(ydims);
 
   normProbNM(corr_ptr, xdims_ptr, ydims_ptr, N, stride, outlier_frac, norm_iters);
 }
@@ -55,12 +55,12 @@ void pyGetTargPts(py::object x, py::object y, py::object xw, py::object yw,
    * target vectors returned in xt and yt
    */
 
-  float* x_ptr = getGPUPointer<float>(x);
-  float* xw_ptr = getGPUPointer<float>(xw);
+  float* x_ptr   = getGPUPointer<float>(x);
+  float* xw_ptr  = getGPUPointer<float>(xw);
   int* xdims_ptr = getGPUPointer<int>(xdims);
 
-  float* y_ptr = getGPUPointer<float>(y);
-  float* yw_ptr = getGPUPointer<float>(yw);
+  float* y_ptr   = getGPUPointer<float>(y);
+  float* yw_ptr  = getGPUPointer<float>(yw);
   int* ydims_ptr = getGPUPointer<int>(ydims);
 
   float* corr_ptr = getGPUPointer<float>(corr);

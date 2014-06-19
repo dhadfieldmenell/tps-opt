@@ -114,18 +114,14 @@ __global__ void _initProbNM(float* x_ptr[], float* y_ptr[], float* xw_ptr[], flo
   n_corr_r = ydim + 1;
   if (tix < MAX_DIM){
     for (int i = 0; i < DATA_DIM; ++i){
-      //note: this is technically incorrect
-      //x, y are rm indexed, but we're just 
-      //copying the whole thing to shared memory
-      //and we're consistent -- s_x ..etc is STILL Row Major!
-      s_x[cMInd(tix, i, MAX_DIM)]  = x[cMInd(tix, i, MAX_DIM)];
-      s_xw[cMInd(tix, i, MAX_DIM)] = xw[cMInd(tix, i, MAX_DIM)];
+      s_x[rMInd(tix, i, DATA_DIM)]  = x[rMInd(tix, i, DATA_DIM)];
+      s_xw[rMInd(tix, i, DATA_DIM)] = xw[rMInd(tix, i, DATA_DIM)];
     }
   }
-  if (tix < MAX_DIM){
+  if (tix < DATA_DIM){
     for (int i = 0; i < DATA_DIM; ++i){
-      s_y[cMInd(tix, i, MAX_DIM)]  = y[cMInd(tix, i, MAX_DIM)];
-      s_yw[cMInd(tix, i, MAX_DIM)] = yw[cMInd(tix, i, MAX_DIM)];
+      s_y[rMInd(tix, i, DATA_DIM)]  = y[rMInd(tix, i, DATA_DIM)];
+      s_yw[rMInd(tix, i, DATA_DIM)] = yw[rMInd(tix, i, DATA_DIM)];
     }
   }
   //Initialize the bottom right
@@ -243,8 +239,11 @@ __global__ void _normProbNM(float* corr_ptr_cm[], float* corr_ptr_rm[], int* xdi
   for(int i = 0; i < MAX_DIM; ++i){
     ix_r = rMInd(i, tix, n_corr_c);
     ix_c = cMInd(tix, i, n_corr_r);
-    corr_rm[ix_r] = corr_rm[ix_r] * row_coeffs[i] * col_coeffs[tix];
+    if (tix < n_corr_c && i < n_corr_r) {
+      corr_rm[ix_r] = corr_rm[ix_r] * row_coeffs[i] * col_coeffs[tix];
+    } if (tix < n_corr_r && i < n_corr_c) {
     corr_cm[ix_c] = corr_cm[ix_c] * row_coeffs[tix] * col_coeffs[i];
+    }
   }
 }
 
@@ -302,7 +301,6 @@ __global__ void  _getTargPts(float* x_ptr[], float* y_ptr[], float* xw_ptr[], fl
     }
     // if the point is an outlier map it to its current warp
     if (r_sum < cutoff){      
-      // printf("Block %i Row %i is an outlier\n", bix, tix);
       for(int i = 0; i < DATA_DIM; ++i){	
     	xt[rMInd(tix, i, DATA_DIM)] = xw[rMInd(tix, i, DATA_DIM)];
       }

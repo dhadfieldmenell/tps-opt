@@ -16,6 +16,8 @@ set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} --gpu-architecture sm_20)
 
 set(CMAKE_CXX_FLAGS "-fPIC")
 
+set(CMAKE_BUILD_TYPE RELEASE)
+
 # CUDA_ADD_LIBRARY(cdist_lib cdist.cu)
 
 include_directories(${PYTHON_NUMPY_INCLUDE_DIR})

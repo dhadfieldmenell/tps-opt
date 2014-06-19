@@ -97,8 +97,10 @@ class GPUContext(object):
         self.dims            = []
         self.dims_gpu        = None
 
-        self.corr_nm         = []
-        self.corr_nm_ptrs    = None
+        self.corr_cm         = []
+        self.corr_cm_ptrs    = None
+        self.corr_rm         = []
+        self.corr_rm_ptrs    = None
         self.seg_names       = []
 
     def reset_tps_params(self):
@@ -143,7 +145,8 @@ class GPUContext(object):
 
         self.pts_w.append(gpuarray.zeros_like(self.pts[-1]))
         self.pts_t.append(gpuarray.zeros_like(self.pts[-1]))
-        self.corr_nm.append(gpuarray.zeros((MAX_CLD_SIZE, MAX_CLD_SIZE), np.float32))
+        self.corr_cm.append(gpuarray.zeros((MAX_CLD_SIZE, MAX_CLD_SIZE), np.float32))
+        self.corr_rm.append(gpuarray.zeros((MAX_CLD_SIZE, MAX_CLD_SIZE), np.float32))
 
         if update_ptrs:
             self.update_ptrs()
@@ -162,7 +165,8 @@ class GPUContext(object):
         self.kernel_ptrs  = get_gpu_ptrs(self.kernels)
         self.pt_w_ptrs    = get_gpu_ptrs(self.pts_w)
         self.pt_t_ptrs    = get_gpu_ptrs(self.pts_t)
-        self.corr_nm_ptrs = get_gpu_ptrs(self.corr_nm)
+        self.corr_cm_ptrs = get_gpu_ptrs(self.corr_cm)
+        self.corr_rm_ptrs = get_gpu_ptrs(self.corr_rm)
         
         self.dims_gpu = gpuarray.to_gpu(np.array(self.dims, dtype=np.int32))
         self.ptrs_valid = True
@@ -216,10 +220,10 @@ class GPUContext(object):
         computes the warp of self.pts under the current tps params
         """
         fill_mat(self.pt_w_ptrs, self.trans_d_ptrs, self.dims_gpu, self.N)
-        dot_batch_nocheck(self.pts,     self.lin_dd,      self.pts_w,
-                          self.pt_ptrs, self.lin_dd_ptrs, self.pt_w_ptrs) 
-        dot_batch_nocheck(self.kernels,      self.w_nd,      self.pts_w,
-                          self.kernel_ptrs, self.w_nd_ptrs,  self.pt_w_ptrs) 
+        dot_batch_nocheck(self.pts,         self.lin_dd,      self.pts_w,
+                          self.pt_ptrs,     self.lin_dd_ptrs, self.pt_w_ptrs) 
+        dot_batch_nocheck(self.kernels,     self.w_nd,        self.pts_w,
+                          self.kernel_ptrs, self.w_nd_ptrs,   self.pt_w_ptrs) 
         sync()
     # @profile
     def get_target_points(self, other, outlierprior, outlierfrac, outliercutoff, T, norm_iters = 10):
@@ -230,13 +234,15 @@ class GPUContext(object):
         init_prob_nm(self.pt_ptrs, other.pt_ptrs, 
                      self.pt_w_ptrs, other.pt_w_ptrs, 
                      self.dims_gpu, other.dims_gpu,
-                     self.N, outlierprior, T, self.corr_nm_ptrs)
+                     self.N, outlierprior, T, 
+                     self.corr_cm_ptrs, self.corr_rm_ptrs)
         sync()
-        norm_prob_nm(self.corr_nm_ptrs, self.dims_gpu, other.dims_gpu, self.N, outlierfrac, norm_iters)
+        norm_prob_nm(self.corr_cm_ptrs, self.corr_rm_ptrs, 
+                     self.dims_gpu, other.dims_gpu, self.N, outlierfrac, norm_iters)
         sync()
-        get_targ_pts(self.pt_ptrs, other.pt_ptrs, 
-                     self.pt_w_ptrs, other.pt_w_ptrs, 
-                     self.corr_nm_ptrs, 
+        get_targ_pts(self.pt_ptrs, other.pt_ptrs,
+                     self.pt_w_ptrs, other.pt_w_ptrs,
+                     self.corr_cm_ptrs, self.corr_rm_ptrs,
                      self.dims_gpu, other.dims_gpu, 
                      outliercutoff, self.N,
                      self.pt_t_ptrs, other.pt_t_ptrs)
@@ -264,7 +270,6 @@ def batch_tps_rpm_bij(src_ctx, tgt_ctx, T_init = 4e-1, T_final = 4e-4,
     src_ctx.reset_tps_params()
     tgt_ctx.reset_tps_params()
     for i, b in enumerate(src_ctx.bend_coeffs):
-        print "Iteration {}".format(i)
         T = T_vals[i]
         for _ in range(em_iter):
             src_ctx.transform_points()
@@ -292,8 +297,8 @@ def main():
     f.close()
     scaled_tgt_cld, _ = unit_boxify(tgt_cld)
     for i in range(20):
-        tgt_ctx = src_ctx.setup_tgt_ctx(scaled_tgt_cld)
         start = time.time()
+        tgt_ctx = src_ctx.setup_tgt_ctx(scaled_tgt_cld)
         batch_tps_rpm_bij(src_ctx, tgt_ctx)
         tgt_ctx.pts[0].get()
         print "Batch Computation Complete, Time Taken is {}".format(time.time() - start)

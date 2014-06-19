@@ -1,7 +1,8 @@
 import numpy as np
 from rapprentice import tps, clouds
 from tps import tps_kernel_matrix2
-import fastps
+from tpsopt.cuda_funcs import init_prob_nm, norm_prob_nm, get_targ_pts, check_cuda_err
+import tpsopt.cuda_funcs as cf
 import IPython as ipy
 import h5py, sys
 import scipy.spatial.distance as ssd
@@ -20,52 +21,62 @@ def downsample_cloud(cloud):
     d = DIM
     cloud_xyz = cloud[:,:d]
     cloud_xyz_downsamp = clouds.downsample(cloud_xyz, DS_SIZE)
-    return cloud_xyz_downsamp
+    return np.array(cloud_xyz_downsamp, dtype=np.float32)
 # @profile
 def test_prob_nm_gen(x_vals, xw_vals, y_vals, yw_vals, x_dims, y_dims, prob_nm_py, outlier_prior, reg):
     print "testing generation"
     max_dim = np.max(np.c_[x_dims, y_dims])
     if max_dim > stride:
         raise Exception, "Matrix Size Exceeds Max Dimensions"
-    x_all = np.zeros((len(x_vals), max_dim, DIM), dtype='float32')
-    y_all = np.zeros((len(x_vals), max_dim, DIM), dtype='float32')
-    xw_all= np.zeros((len(x_vals), max_dim, DIM), dtype='float32')
-    yw_all= np.zeros((len(x_vals), max_dim, DIM), dtype='float32')
+    x_vals_gpu    = []
+    y_vals_gpu    = []
+    xw_vals_gpu   = []
+    yw_vals_gpu   = []
+    corr_vals_gpu = []
+
+    x_ptr    = []
+    y_ptr    = []
+    xw_ptr   = []
+    yw_ptr   = []
+    corr_ptr = []
 
     N = len(x_vals)
 
     for i in range(N):
-        x_all[i, :x_dims[i], :] = x_vals[i]
-        y_all[i, :y_dims[i], :] = y_vals[i]
-        xw_all[i, :x_dims[i], :] = xw_vals[i]
-        yw_all[i, :y_dims[i], :] = yw_vals[i]
-        
-    prob_nm_gpu = np.empty(N * (max_dim+1) * (max_dim + 1), dtype='float32')
-    prob_nm_gpu_dev = gpuarray.to_gpu(prob_nm_gpu)
-    x_gpu = gpuarray.to_gpu(x_all.flatten())
-    xw_gpu = gpuarray.to_gpu(xw_all.flatten())
-    y_gpu = gpuarray.to_gpu(y_all.flatten())
-    yw_gpu = gpuarray.to_gpu(yw_all.flatten())
+        x_vals_gpu.append(gpuarray.to_gpu(x_vals[i]))
+        x_ptr.append(int(x_vals_gpu[i].gpudata))
+        y_vals_gpu.append(gpuarray.to_gpu(y_vals[i]))
+        y_ptr.append(int(y_vals_gpu[i].gpudata))
+        xw_vals_gpu.append(gpuarray.to_gpu(xw_vals[i]))
+        xw_ptr.append(int(xw_vals_gpu[i].gpudata))
+        yw_vals_gpu.append(gpuarray.to_gpu(yw_vals[i]))
+        yw_ptr.append(int(yw_vals_gpu[i].gpudata))
+        corr_vals_gpu.append(gpuarray.empty(((x_dims[i]+1), (y_dims[i]+1)), dtype=np.float32))
+        corr_ptr.append(int(corr_vals_gpu[i].gpudata))
 
-    xdims_gpu = gpuarray.to_gpu(np.array(x_dims, dtype='int'))
-    ydims_gpu = gpuarray.to_gpu(np.array(y_dims, dtype='int'))
+    x_ptr_gpu = gpuarray.to_gpu(np.asarray(x_ptr))
+    xw_ptr_gpu = gpuarray.to_gpu(np.asarray(xw_ptr))
+    y_ptr_gpu = gpuarray.to_gpu(np.asarray(y_ptr))
+    yw_ptr_gpu = gpuarray.to_gpu(np.asarray(yw_ptr))
+    corr_ptr_gpu = gpuarray.to_gpu(np.asarray(corr_ptr))
 
-    # fastps.float_gpu_print_arr(x_gpu, 20)
+    xdims_gpu = gpuarray.to_gpu(np.array(x_dims, dtype=np.int32))
+    ydims_gpu = gpuarray.to_gpu(np.array(y_dims, dtype=np.int32))
+
+    # cf.float_gpu_print_arr(xw_vals_gpu[0], 20)
+    # print xw_vals[0].flatten()[:20]
     # print x_all.flatten()[:20]
 
-    # fastps.int_gpu_print_arr(xdims_gpu, N)
+    # int_gpu_print_arr(xdims_gpu, N)
     # print x_dims
 
-    fastps.init_prob_nm(x_gpu, y_gpu, xw_gpu, yw_gpu, xdims_gpu, ydims_gpu, N, 
-                        max_dim, outlier_prior, reg, prob_nm_gpu_dev)
-
-    prob_nm_gpu = prob_nm_gpu_dev.get()
+    init_prob_nm(x_ptr_gpu, y_ptr_gpu, xw_ptr_gpu, yw_ptr_gpu, xdims_gpu, ydims_gpu, N, 
+                 outlier_prior, reg, corr_ptr_gpu)    
+    cf.check_cuda_err()
 
     for i in range(len(x_vals)):
-        prob_nm_offset = i * max_dim * max_dim
-        size = (x_dims[i] + 1) * (y_dims[i] + 1)
         p_nm_py = prob_nm_py[i]
-        p_nm_gpu = prob_nm_gpu[prob_nm_offset:prob_nm_offset + size].reshape(p_nm_py.shape)
+        p_nm_gpu = corr_vals_gpu[i].get()
         if np.any(np.isnan(p_nm_py - p_nm_gpu)) or np.linalg.norm(p_nm_py - p_nm_gpu) > 1e-4:
             diff = np.abs(p_nm_py - p_nm_gpu)
             nz = np.nonzero(diff > .001)
@@ -84,52 +95,51 @@ def test_prob_nm_gen(x_vals, xw_vals, y_vals, yw_vals, x_dims, y_dims, prob_nm_p
 def test_prob_nm_norm(x_vals, xw_vals, y_vals, yw_vals, x_dims, y_dims, prob_nm_py, 
                       outlier_prior, reg, outlier_frac, norm_iters):
     print "testing normalization"
-    print "testing generation"
     max_dim = np.max(np.c_[x_dims, y_dims])
     if max_dim > stride:
         raise Exception, "Matrix Size Exceeds Max Dimensions"
-    x_all = np.zeros((len(x_vals), max_dim, DIM), dtype='float32')
-    y_all = np.zeros((len(x_vals), max_dim, DIM), dtype='float32')
-    xw_all= np.zeros((len(x_vals), max_dim, DIM), dtype='float32')
-    yw_all= np.zeros((len(x_vals), max_dim, DIM), dtype='float32')
+    x_vals_gpu    = []
+    y_vals_gpu    = []
+    xw_vals_gpu   = []
+    yw_vals_gpu   = []
+    corr_vals_gpu = []
+
+    x_ptr    = []
+    y_ptr    = []
+    xw_ptr   = []
+    yw_ptr   = []
+    corr_ptr = []
 
     N = len(x_vals)
 
     for i in range(N):
-        x_all[i, :x_dims[i], :] = x_vals[i]
-        y_all[i, :y_dims[i], :] = y_vals[i]
-        xw_all[i, :x_dims[i], :] = xw_vals[i]
-        yw_all[i, :y_dims[i], :] = yw_vals[i]
-        
-    prob_nm_gpu = np.empty(N * (max_dim+1) * (max_dim + 1), dtype='float32')
-    prob_nm_gpu_dev = gpuarray.to_gpu(prob_nm_gpu)
-    x_gpu = gpuarray.to_gpu(x_all.flatten())
-    xw_gpu = gpuarray.to_gpu(xw_all.flatten())
-    y_gpu = gpuarray.to_gpu(y_all.flatten())
-    yw_gpu = gpuarray.to_gpu(yw_all.flatten())
+        x_vals_gpu.append(gpuarray.to_gpu(x_vals[i]))
+        x_ptr.append(int(x_vals_gpu[i].gpudata))
+        y_vals_gpu.append(gpuarray.to_gpu(y_vals[i]))
+        y_ptr.append(int(y_vals_gpu[i].gpudata))
+        xw_vals_gpu.append(gpuarray.to_gpu(xw_vals[i]))
+        xw_ptr.append(int(xw_vals_gpu[i].gpudata))
+        yw_vals_gpu.append(gpuarray.to_gpu(yw_vals[i]))
+        yw_ptr.append(int(yw_vals_gpu[i].gpudata))
+        corr_vals_gpu.append(gpuarray.empty(((x_dims[i]+1), (y_dims[i]+1)), dtype=np.float32))
+        corr_ptr.append(int(corr_vals_gpu[i].gpudata))
 
-    xdims_gpu = gpuarray.to_gpu(np.array(x_dims, dtype='int'))
-    ydims_gpu = gpuarray.to_gpu(np.array(y_dims, dtype='int'))
+    x_ptr_gpu = gpuarray.to_gpu(np.asarray(x_ptr))
+    xw_ptr_gpu = gpuarray.to_gpu(np.asarray(xw_ptr))
+    y_ptr_gpu = gpuarray.to_gpu(np.asarray(y_ptr))
+    yw_ptr_gpu = gpuarray.to_gpu(np.asarray(yw_ptr))
+    corr_ptr_gpu = gpuarray.to_gpu(np.asarray(corr_ptr))
 
-    # fastps.float_gpu_print_arr(x_gpu, 20)
-    # print x_all.flatten()[:20]
+    xdims_gpu = gpuarray.to_gpu(np.array(x_dims, dtype=np.int32))
+    ydims_gpu = gpuarray.to_gpu(np.array(y_dims, dtype=np.int32))
 
-    # fastps.int_gpu_print_arr(xdims_gpu, N)
-    # print x_dims
-
-    fastps.init_prob_nm(x_gpu, y_gpu, xw_gpu, yw_gpu, xdims_gpu, ydims_gpu, N, 
-                        max_dim, outlier_prior, reg, prob_nm_gpu_dev)
-    fastps.norm_prob_nm(prob_nm_gpu_dev, xdims_gpu, ydims_gpu, N, max_dim, 
-                        outlier_frac, norm_iters)
-
-    prob_nm_gpu = prob_nm_gpu_dev.get()
-
+    init_prob_nm(x_ptr_gpu, y_ptr_gpu, xw_ptr_gpu, yw_ptr_gpu, xdims_gpu, ydims_gpu, N, 
+                 outlier_prior, reg, corr_ptr_gpu)    
+    norm_prob_nm(corr_ptr_gpu, xdims_gpu, ydims_gpu, N, outlier_frac, norm_iters)
 
     for i in range(len(x_vals)):
-        prob_nm_offset = i * max_dim * max_dim
-        size = (x_dims[i] + 1) * (y_dims[i] + 1)
         p_nm_py = prob_nm_py[i]
-        p_nm_gpu = prob_nm_gpu[prob_nm_offset:prob_nm_offset + size].reshape(p_nm_py.shape)
+        p_nm_gpu = corr_vals_gpu[i].get()
         ## Max must equal max
         py_max = np.r_[np.argmax(p_nm_py, axis=1), np.argmax(p_nm_py, axis=0)]
         gpu_max = np.r_[np.argmax(p_nm_gpu, axis=1), np.argmax(p_nm_gpu, axis=0)]
@@ -151,67 +161,77 @@ def test_prob_nm_norm(x_vals, xw_vals, y_vals, yw_vals, x_dims, y_dims, prob_nm_
             ipy.embed()
             sys.exit(1)
     print "PROB_NM GPU NORMALIZATION SUCCEEDED MAX AGREEMENT IS {}!!!".format(tgt_rate)
-# @profile
+@profile
 def test_get_targ_pts(x_vals, xw_vals, y_vals, yw_vals, x_dims, y_dims, prob_nm_py, 
                       outlier_prior, reg, outlier_frac, norm_iters, outlier_cutoff = .1):
-    print "testing normalization"
-    print "testing generation"
+    print "testing get targ"
     max_dim = np.max(np.c_[x_dims, y_dims])
     if max_dim > stride:
         raise Exception, "Matrix Size Exceeds Max Dimensions"
+    x_vals_gpu    = []
+    y_vals_gpu    = []
+    xw_vals_gpu   = []
+    yw_vals_gpu   = []
+    corr_vals_gpu = []
+    xt_vals_gpu    = []
+    yt_vals_gpu    = []
+
+    x_ptr    = []
+    y_ptr    = []
+    xw_ptr   = []
+    yw_ptr   = []
+    corr_ptr = []
+    xt_ptr    = []
+    yt_ptr    = []
 
     N = len(x_vals)
-    x_all = np.zeros((N, max_dim, DIM), dtype='float32')
-    y_all = np.zeros((N, max_dim, DIM), dtype='float32')
-    xw_all= np.zeros((N, max_dim, DIM), dtype='float32')
-    yw_all= np.zeros((N, max_dim, DIM), dtype='float32')
-    xt = np.zeros((N, max_dim, DIM), dtype='float32')
-    yt = np.zeros((N, max_dim, DIM), dtype='float32')
-
 
     for i in range(N):
-        x_all[i, :x_dims[i], :] = x_vals[i]
-        y_all[i, :y_dims[i], :] = y_vals[i]
-        xw_all[i, :x_dims[i], :] = xw_vals[i]
-        yw_all[i, :y_dims[i], :] = yw_vals[i]
-        
-    prob_nm_gpu     = np.empty(N * (max_dim+1) * (max_dim + 1), dtype='float32')
-    prob_nm_gpu_dev = gpuarray.to_gpu(prob_nm_gpu)
-    x_gpu           = gpuarray.to_gpu(x_all.flatten())
-    xw_gpu          = gpuarray.to_gpu(xw_all.flatten())
-    y_gpu           = gpuarray.to_gpu(y_all.flatten())
-    yw_gpu          = gpuarray.to_gpu(yw_all.flatten())
+        x_vals_gpu.append(gpuarray.to_gpu(x_vals[i]))
+        x_ptr.append(int(x_vals_gpu[i].gpudata))
+        xt_vals_gpu.append(gpuarray.empty((stride, DIM), np.float32))
+        xt_ptr.append(int(xt_vals_gpu[i].gpudata))
+        y_vals_gpu.append(gpuarray.to_gpu(y_vals[i]))
+        y_ptr.append(int(y_vals_gpu[i].gpudata))
+        yt_vals_gpu.append(gpuarray.empty((stride, DIM), np.float32))
+        yt_ptr.append(int(yt_vals_gpu[i].gpudata))
+        xw_vals_gpu.append(gpuarray.to_gpu(xw_vals[i]))
+        xw_ptr.append(int(xw_vals_gpu[i].gpudata))
+        yw_vals_gpu.append(gpuarray.to_gpu(yw_vals[i]))
+        yw_ptr.append(int(yw_vals_gpu[i].gpudata))
+        corr_vals_gpu.append(gpuarray.empty(((x_dims[i]+1), (y_dims[i]+1)), dtype=np.float32))
+        corr_ptr.append(int(corr_vals_gpu[i].gpudata))
 
-    xdims_gpu = gpuarray.to_gpu(np.array(x_dims, dtype='int'))
-    ydims_gpu = gpuarray.to_gpu(np.array(y_dims, dtype='int'))
+    x_ptr_gpu = gpuarray.to_gpu(np.asarray(x_ptr))
+    xw_ptr_gpu = gpuarray.to_gpu(np.asarray(xw_ptr))
+    y_ptr_gpu = gpuarray.to_gpu(np.asarray(y_ptr))
+    yw_ptr_gpu = gpuarray.to_gpu(np.asarray(yw_ptr))
+    corr_ptr_gpu = gpuarray.to_gpu(np.asarray(corr_ptr))
 
-    xt_gpu_dev = gpuarray.to_gpu(xt.flatten())
-    yt_gpu_dev = gpuarray.to_gpu(yt.flatten())
+    xt_ptr_gpu = gpuarray.to_gpu(np.asarray(xt_ptr))
+    yt_ptr_gpu = gpuarray.to_gpu(np.asarray(yt_ptr))
 
-    fastps.init_prob_nm(x_gpu, y_gpu, xw_gpu, yw_gpu, xdims_gpu, ydims_gpu, N, 
-                        max_dim, outlier_prior, reg, prob_nm_gpu_dev)
-    fastps.norm_prob_nm(prob_nm_gpu_dev, xdims_gpu, ydims_gpu, N, max_dim, 
-                        outlier_frac, norm_iters)
-    fastps.get_targ_pts(x_gpu, y_gpu, xw_gpu, yw_gpu, prob_nm_gpu_dev, xdims_gpu, ydims_gpu,
-                        outlier_cutoff, N, max_dim, xt_gpu_dev, yt_gpu_dev)
+    xdims_gpu = gpuarray.to_gpu(np.array(x_dims, dtype=np.int32))
+    ydims_gpu = gpuarray.to_gpu(np.array(y_dims, dtype=np.int32))
 
-    prob_nm_gpu = prob_nm_gpu_dev.get()
-    xt_gpu = xt_gpu_dev.get()
-    yt_gpu = yt_gpu_dev.get()
+    init_prob_nm(x_ptr_gpu, y_ptr_gpu, xw_ptr_gpu, yw_ptr_gpu, xdims_gpu, ydims_gpu, N, 
+                 outlier_prior, reg, corr_ptr_gpu)
+    cf.check_cuda_err()
+    norm_prob_nm(corr_ptr_gpu, xdims_gpu, ydims_gpu, N, outlier_frac, norm_iters)
+    cf.check_cuda_err()
+    get_targ_pts(x_ptr_gpu, y_ptr_gpu, xw_ptr_gpu, yw_ptr_gpu, corr_ptr_gpu, xdims_gpu, ydims_gpu,
+                 outlier_cutoff, N, xt_ptr_gpu, yt_ptr_gpu)
+    cf.check_cuda_err()
+
 
     for i, x_nd in enumerate(x_vals):
         y_md = y_vals[i]
-        prob_nm_offset = i * max_dim * max_dim
-        data_offset = i * max_dim * DIM        
-        size = (x_dims[i] + 1) * (y_dims[i] + 1)
-        x_size = max_dim * DIM
-        y_size = max_dim * DIM
-        xt_i = np.reshape(xt_gpu[data_offset:data_offset + x_size], (max_dim, DIM), order='F')
-        xt_i = xt_i[:x_dims[i], :]
-        yt_i = yt_gpu[data_offset:data_offset + y_size].reshape((max_dim, DIM), order='F')
-        yt_i = yt_i[:y_dims[i], :]
+        xt_i = xt_vals_gpu[i].get()
+        xt_i = xt_i[:x_nd.shape[0], :]
+        yt_i = yt_vals_gpu[i].get()
+        yt_i = yt_i[:y_md.shape[0], :]
         p_nm_py = prob_nm_py[i]
-        corr_nm = prob_nm_gpu[prob_nm_offset:prob_nm_offset + size].reshape(p_nm_py.shape)[:-1, :-1]
+        corr_nm = corr_vals_gpu[i].get()[:-1, :-1]
 
         wt_n = corr_nm.sum(axis=1)
 
@@ -240,7 +260,7 @@ def test_get_targ_pts(x_vals, xw_vals, y_vals, yw_vals, x_dims, y_dims, prob_nm_
                 sys.exit(1)
     print "GET TARG PTS TEST SUCCEEDED"    
 
-# @profile
+@profile
 def tps_rpm_em_all(x_vals, y_vals, tps_params = None, outlier_prior = .1, reg = .01, 
                    outlierfrac = .01, norm_iter=10):
     if not tps_params:
@@ -272,8 +292,8 @@ def tps_rpm_em_all(x_vals, y_vals, tps_params = None, outlier_prior = .1, reg = 
             np.dot(x, cur_params['fw_lin_ag']) + cur_params['fw_trans_g'][None, :]
         inv_warp = np.dot(cur_params['inv_kernel'], cur_params['inv_w_ng']) + \
             np.dot(y, cur_params['inv_lin_ag']) + cur_params['inv_trans_g'][None, :]
-        x_warped.append(fw_warp)
-        y_warped.append(inv_warp)
+        x_warped.append(fw_warp.astype(np.float32))
+        y_warped.append(inv_warp.astype(np.float32))
         
         fwddist_nm = ssd.cdist(fw_warp, y,'euclidean')
         invdist_nm = ssd.cdist(x, inv_warp,'euclidean')
@@ -303,8 +323,8 @@ def tps_rpm_em_all(x_vals, y_vals, tps_params = None, outlier_prior = .1, reg = 
 
         p_nm *= r_N[:,None]
         p_nm *= c_M[None,:]
-    test_prob_nm_norm(x_vals, x_warped, y_vals, y_warped, x_dims, y_dims, prob_nm_py, 
-                      outlier_prior, reg, outlierfrac, norm_iter)
+    # test_prob_nm_norm(x_vals, x_warped, y_vals, y_warped, x_dims, y_dims, prob_nm_py, 
+    #                   outlier_prior, reg, outlierfrac, norm_iter)
     test_get_targ_pts(x_vals, x_warped, y_vals, y_warped, x_dims, y_dims, prob_nm_py, 
                       outlier_prior, reg, outlierfrac, norm_iter)
     

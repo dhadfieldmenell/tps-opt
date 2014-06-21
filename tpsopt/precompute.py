@@ -8,6 +8,15 @@ from tps import tps_kernel_matrix
 from transformations import unit_boxify
 from rapprentice import clouds, plotting_plt
 
+from culinalg_exts import dot_batch, get_gpu_ptrs, dot_batch_nocheck, m_dot_batch
+
+import pycuda.driver as drv
+import pycuda.autoinit
+from pycuda import gpuarray
+import scikits.cuda.linalg
+from scikits.cuda.linalg import dot as cu_dot
+from scikits.cuda.linalg import pinv as cu_pinv
+
 import IPython as ipy
 
 def loglinspace(a,b,n):
@@ -24,7 +33,69 @@ def parse_arguments():
     parser.add_argument('--replace', action='store_true')
     parser.add_argument('--cloud_name', type=str, default='cloud_xyz')
     return parser.parse_args()
+# @profile
+def batch_get_sol_params(x_nd, K_nn, bend_coefs, rot_coef=np.r_[1e-4, 1e-4, 1e-1]):
+    n, d = x_nd.shape
 
+    x_gpu = gpuarray.to_gpu(x_nd)
+
+    H_arr_gpu = []
+    for b in bend_coefs:
+        cur_offset = np.zeros((1 + d + n, 1 + d + n), np.float32)
+        cur_offset[d+1:, d+1:] = b * K_nn
+        cur_offset[1:d+1, 1:d+1] = np.diag(rot_coef)
+        H_arr_gpu.append(gpuarray.to_gpu(cur_offset))
+    H_ptr_gpu = get_gpu_ptrs(H_arr_gpu)
+
+    A = np.r_[np.zeros((d+1,d+1)), np.c_[np.ones((n,1)), x_nd]].T
+    n_cnts = A.shape[0]
+    _u,_s,_vh = np.linalg.svd(A.T)
+    N = _u[:,n_cnts:]
+    F = np.zeros((n + d + 1, d), np.float32)
+    F[1:d+1, :d] -= np.diag(rot_coef)
+    
+    Q = np.c_[np.ones((n,1)), x_nd, K_nn].astype(np.float32)
+    F = F.astype(np.float32)
+    N = N.astype(np.float32)
+
+    Q_gpu     = gpuarray.to_gpu(Q)
+    Q_arr_gpu = [Q_gpu for _ in range(len(bend_coefs))]
+    Q_ptr_gpu = get_gpu_ptrs(Q_arr_gpu)
+
+    F_gpu     = gpuarray.to_gpu(F)
+    F_arr_gpu = [F_gpu for _ in range(len(bend_coefs))]
+    F_ptr_gpu = get_gpu_ptrs(F_arr_gpu)
+
+    N_gpu = gpuarray.to_gpu(N)
+    N_arr_gpu = [N_gpu for _ in range(len(bend_coefs))]
+    N_ptr_gpu = get_gpu_ptrs(N_arr_gpu)
+    
+    dot_batch_nocheck(Q_arr_gpu, Q_arr_gpu, H_arr_gpu,
+                      Q_ptr_gpu, Q_ptr_gpu, H_ptr_gpu,
+                      transa = 'T')
+    # N'HN
+    NHN_arr_gpu, NHN_ptr_gpu = m_dot_batch((N_arr_gpu, N_ptr_gpu, 'T'),
+                                           (H_arr_gpu, H_ptr_gpu, 'N'),
+                                           (N_arr_gpu, N_ptr_gpu, 'N'))
+    iH_arr = []
+    for NHN in NHN_arr_gpu:
+        iH_arr.append(scipy.linalg.inv(NHN.get()))
+    iH_arr_gpu = [gpuarray.to_gpu_async(iH) for iH in iH_arr]
+    iH_ptr_gpu = get_gpu_ptrs(iH_arr_gpu)
+
+    proj_mats   = m_dot_batch((N_arr_gpu,  N_ptr_gpu,   'N'),
+                              (iH_arr_gpu, iH_ptr_gpu, 'N'),
+                              (N_arr_gpu,  N_ptr_gpu,   'T'),
+                              (Q_arr_gpu,  Q_ptr_gpu,   'T'))
+
+    offset_mats = m_dot_batch((N_arr_gpu,  N_ptr_gpu,   'N'),
+                              (iH_arr_gpu, iH_ptr_gpu, 'N'),
+                              (N_arr_gpu,  N_ptr_gpu,   'T'),
+                              (F_arr_gpu,  F_ptr_gpu,   'N'))
+
+    return proj_mats, offset_mats
+
+# @profile
 def get_sol_params(x_na, K_nn, bend_coef, rot_coef=np.r_[1e-4, 1e-4, 1e-1]):
     """
     precomputes the linear operators to solve this linear system. 
@@ -47,15 +118,17 @@ def get_sol_params(x_na, K_nn, bend_coef, rot_coef=np.r_[1e-4, 1e-4, 1e-1]):
     n_cnts = A.shape[0]
     _u,_s,_vh = np.linalg.svd(A.T)
     N = _u[:,n_cnts:]
-
-    h_inv = scipy.linalg.inv(N.T.dot(H.dot(N)))
-
+    tmp = N.T.dot(H.dot(N))
+    h_inv = scipy.linalg.inv(tmp)
+    
     # z = np.linalg.solve(N.T.dot(H.dot(N)), -N.T.dot(f))
     # x = N.dot(z)
 
 
     ## x = N * (N' * H * N)^-1 * N' * Q' * y + N * (N' * H * N)^-1 * N' * diag(rot_coeffs)
     ## x = proj_mat * y + offset_mat
+    ## technically we could reduce this (the N * N^-1 cancel), but H is not full rank, 
+    ## so it is better to invert N' * H * N, which is square and full rank
     proj_mat = N.dot(h_inv.dot(N.T.dot(Q.T)))
     F = np.zeros(Q.T.dot(x_na).shape)
     F[1:d+1,0:d] -= np.diag(rot_coefs)

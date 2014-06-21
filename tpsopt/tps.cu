@@ -89,6 +89,12 @@ __global__ void _initProbNM(float* x_ptr[], float* y_ptr[], float* xw_ptr[], flo
   /* Batch Initialize the correspondence matrix for use in TPS-RPM
    * Called with 1 Block per item in the batch and MAX_DIM threads
    * assumes data is padded with 0's beyond bounds
+   * Timing -- compute constrained
+   *     -  Normal                      1.5440ms
+   *     -  No P write                  1.6959ms
+   *     -  Minimal Mem                 1.4142ms
+   *     -  Single exp, contig writes   829.90us
+   *     -  No Shared Mem               1.6208ms
    */
   __shared__ float s_x[MAX_DIM * DATA_DIM], s_y[MAX_DIM * DATA_DIM];
   __shared__ float s_xw[MAX_DIM * DATA_DIM], s_yw[MAX_DIM * DATA_DIM];
@@ -155,6 +161,7 @@ __global__ void _initProbNM(float* x_ptr[], float* y_ptr[], float* xw_ptr[], flo
       diff = s_x[i_ix + k] - s_yw[j_ix + k];
       tmp += diff * diff;
     }
+    dist_ij += sqrt(tmp);
 
     tmp = 0;
     for (int k = 0; k < DATA_DIM; ++k){
@@ -163,7 +170,7 @@ __global__ void _initProbNM(float* x_ptr[], float* y_ptr[], float* xw_ptr[], flo
     }
     dist_ji += sqrt(tmp);
 
-    if (tix < xdim) corr_cm[cMInd(tix, j, n_corr_r)] = exp( -1 * dist_ij / (float) (2 * r));      
+    if (tix < xdim) corr_cm[cMInd(tix, j, n_corr_r)] = exp( -1 * dist_ij / (float) (2 * r));
     if (tix < ydim) corr_rm[rMInd(j, tix, n_corr_c)] = exp( -1 * dist_ji / (float) (2 * r));      
   }
   if (tix < xdim) {
@@ -189,6 +196,11 @@ __global__ void _normProbNM(float* corr_ptr_cm[], float* corr_ptr_rm[], int* xdi
    *  3. Norm rows
    *  4. Sum Columns
    *  5. Norm Colums -- repeat
+   * Timing -- memory limited
+   *    -  Minimal Memory Accesses:       407.97us
+   *    -  Write (only) to corr_rm/cm:    913.71us
+   *    -  Read  (only) from corr_rm/cm:  1.9716ms
+   *    -  RW from corr_rm/cm:            2.6585ms
    */
   //set up shared variables to be read once
   __shared__ int n_corr_r, n_corr_c;
@@ -242,7 +254,7 @@ __global__ void _normProbNM(float* corr_ptr_cm[], float* corr_ptr_rm[], int* xdi
     if (tix < n_corr_c && i < n_corr_r) {
       corr_rm[ix_r] = corr_rm[ix_r] * row_coeffs[i] * col_coeffs[tix];
     } if (tix < n_corr_r && i < n_corr_c) {
-    corr_cm[ix_c] = corr_cm[ix_c] * row_coeffs[tix] * col_coeffs[i];
+      corr_cm[ix_c] = corr_cm[ix_c] * row_coeffs[tix] * col_coeffs[i];
     }
   }
 }
@@ -261,6 +273,13 @@ __global__ void  _getTargPts(float* x_ptr[], float* y_ptr[], float* xw_ptr[], fl
    *  3. Update xt with correct value (0 pad other areas
    *  4. Norm cols of corr, detect target outliers
    *  5. Update yt with correct value (0 pad other areas
+   * Timing -- memory/compute limited
+   *    -  Minimal Memory Accesses:       875.12us
+   *    -  Only Reading x/y into s:       748.21us
+   *    -  Reading the sum:               711.14us (Why is this so much faster)
+   *    -  Reads from xw/yw:              613.57us
+   *    -  No sum/everything else:        838.12us
+   *    -  Full:                          1.6679ms                  
    */
   __shared__ int xdim, ydim; int n_corr_r, n_corr_c;
   __shared__ float s_y[MAX_DIM * DATA_DIM], s_x[MAX_DIM * DATA_DIM];
@@ -299,7 +318,7 @@ __global__ void  _getTargPts(float* x_ptr[], float* y_ptr[], float* xw_ptr[], fl
     for(int i = 0; i < ydim; ++i){
       r_sum = r_sum + corr_cm[cMInd(tix, i, n_corr_r)];
     }
-    // if the point is an outlier map it to its current warp
+    //if the point is an outlier map it to its current warp
     if (r_sum < cutoff){      
       for(int i = 0; i < DATA_DIM; ++i){	
     	xt[rMInd(tix, i, DATA_DIM)] = xw[rMInd(tix, i, DATA_DIM)];

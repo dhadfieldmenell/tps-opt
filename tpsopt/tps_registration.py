@@ -13,8 +13,8 @@ linalg.init()
 
 from tps import tps_kernel_matrix
 from transformations import unit_boxify
-from culinalg_exts import dot_batch_nocheck
-from precompute import get_sol_params, downsample_cloud
+from culinalg_exts import dot_batch_nocheck, get_gpu_ptrs
+from precompute import downsample_cloud, batch_get_sol_params
 from cuda_funcs import init_prob_nm, norm_prob_nm, get_targ_pts, check_cuda_err, fill_mat
 
 import IPython as ipy
@@ -46,11 +46,6 @@ def gpu_pad(x, shape, dtype=np.float32):
     x_new = np.zeros(shape, dtype=dtype)    
     x_new[:m, :n] = x
     return gpuarray.to_gpu(x_new)
-
-def get_gpu_ptrs(arr, (m, n) = (0, 0)):
-    ptrs = [int(x[m:, n:].gpudata) for x in arr]
-    return gpuarray.to_gpu(np.array(ptrs))
-
 
 class GPUContext(object):
     """
@@ -113,10 +108,30 @@ class GPUContext(object):
         for d, s in zip(self.tps_params, vals):
             drv.memcpy_dtod_async(d.gpudata, s.gpudata, d.mem_size)            
 
+    def check_cld(self, cloud_xyz):
+        if cloud_xyz.dtype != np.float32:
+            raise TypeError("only single precision operations supported")
+        if cloud_xyz.shape[0] > MAX_CLD_SIZE:
+            raise ValueError("cloud size exceeds {}".format(MAX_CLD_SIZE))
+        if cloud_xyz.shape[1] != DATA_DIM:
+            raise ValueError("point cloud must have column dimension {}".format(DATA_DIM))
+    # @profile
+    def get_sol_params(self, cld):
+        self.check_cld(cld)
+        K = tps_kernel_matrix(cld)
+        proj_mats   = {}
+        offset_mats = {}
+        (proj_mats_arr, _), (offset_mats_arr, _) = batch_get_sol_params(cld, K, self.bend_coeffs)
+        for i, b in enumerate(self.bend_coeffs):
+            proj_mats[b]   = proj_mats_arr[i]
+            offset_mats[b] = offset_mats_arr[i]
+        return proj_mats, offset_mats, K
+
     def add_cld(self, name, proj_mats, offset_mats, cloud_xyz, kernel, update_ptrs = False):
         """
         adds a new cloud to our context for batch processing
         """
+        self.check_cld(cloud_xyz)
         self.ptrs_valid = False
         self.N += 1
         self.seg_names.append(name)
@@ -130,6 +145,7 @@ class GPUContext(object):
             proj_mat   = proj_mats[b]
             offset_mat = offset_mats[b]
             self.proj_mats[b].append(gpu_pad(proj_mat, (MAX_CLD_SIZE + DATA_DIM + 1, MAX_CLD_SIZE)))
+
             if offset_mat.shape != (n + DATA_DIM + 1, DATA_DIM):
                 raise ValueError("Offset Matrix has incorrect dimension")
             self.offset_mats[b].append(gpu_pad(offset_mat, (MAX_CLD_SIZE + DATA_DIM + 1, DATA_DIM)))
@@ -193,27 +209,18 @@ class GPUContext(object):
             self.add_cld(seg_name, proj_mats, offset_mats, cloud_xyz, kernel)
         f.close()
         self.update_ptrs()
-
+    # @profile
     def setup_tgt_ctx(self, cloud_xyz):
         """
         returns a GPUContext where all the clouds are cloud_xyz
         and matched in length with this contex
 
         assumes cloud_xyz is already downsampled and scaled
-        """
-        tgt_ctx = GPUContext(self.bend_coeffs)
-        K_nn = tps_kernel_matrix(cloud_xyz)
-        proj_mats   = {}
-        offset_mats = {}
-        for b in self.bend_coeffs:
-            _, res = get_sol_params(cloud_xyz, K_nn, b)
-            proj_mats[b]   = res['proj_mat']
-            offset_mats[b] = res['offset_mat']
-        for n in self.seg_names:
-            tgt_n = "y_{}".format(n)
-            tgt_ctx.add_cld(tgt_n, proj_mats, offset_mats, cloud_xyz, K_nn)
-        tgt_ctx.update_ptrs()
+        """        
+        tgt_ctx = TgtContext(self)
+        tgt_ctx.set_cld(cloud_xyz)
         return tgt_ctx
+
     # @profile
     def transform_points(self):
         """
@@ -256,6 +263,54 @@ class GPUContext(object):
         dot_batch_nocheck(self.proj_mats[b],     self.pts_t,     self.tps_params,
                           self.proj_mat_ptrs[b], self.pt_t_ptrs, self.tps_param_ptrs)
         sync()
+
+class TgtContext(GPUContext):
+    """
+    specialized class to handle the case where we are
+    mapping to a single target cloud --> only allocate GPU Memory once
+    """
+    def __init__(self, src_ctx):
+        GPUContext.__init__(self, src_ctx.bend_coeffs)
+        self.src_ctx = src_ctx
+        ## just setup with 0's
+        tgt_cld = np.zeros((MAX_CLD_SIZE, DATA_DIM), np.float32)
+        proj_mats = dict([(b, np.zeros((MAX_CLD_SIZE + DATA_DIM + 1, MAX_CLD_SIZE), np.float32)) 
+                          for b in self.bend_coeffs])
+        offset_mats = dict([(b, np.zeros((MAX_CLD_SIZE + DATA_DIM + 1, DATA_DIM), np.float32)) 
+                            for b in self.bend_coeffs])
+        tgt_K = np.zeros((MAX_CLD_SIZE, MAX_CLD_SIZE), np.float32)
+        for n in src_ctx.seg_names:
+            name = "{}_tgt".format(n)
+            GPUContext.add_cld(self, name, proj_mats, offset_mats, tgt_cld, tgt_K)
+        GPUContext.update_ptrs(self)
+    def add_cld(self, name, proj_mats, offset_mats, cloud_xyz, kernel, update_ptrs = False):
+        raise NotImplementedError("not implemented for TgtConext")
+    def update_ptrs(self):
+        raise NotImplementedError("not implemented for TgtConext")
+    # @profile
+    def set_cld(self, cld):
+        """
+        sets the cloud for this appropriately
+        won't allocate any new memory
+        """                          
+        proj_mats, offset_mats, K = self.get_sol_params(cld)
+        
+        self.pts         = [gpu_pad(cld, (MAX_CLD_SIZE, DATA_DIM))]
+        self.kernels     = [gpu_pad(K, (MAX_CLD_SIZE, MAX_CLD_SIZE))]
+        self.proj_mats   = dict([(b, [gpu_pad(p.get(), (MAX_CLD_SIZE + DATA_DIM + 1, MAX_CLD_SIZE))])
+                                 for b, p in proj_mats.iteritems()])
+        self.offset_mats = dict([(b, [gpu_pad(p.get(), (MAX_CLD_SIZE + DATA_DIM + 1, DATA_DIM))]) 
+                                 for b, p in offset_mats.iteritems()])
+
+        self.pt_ptrs.fill(int(self.pts[0].gpudata))
+        self.kernel_ptrs.fill(int(self.kernels[0].gpudata))
+        for b in self.bend_coeffs:
+            self.proj_mat_ptrs[b].fill(int(self.proj_mats[b][0].gpudata))
+            self.offset_mat_ptrs[b].fill(int(self.offset_mats[b][0].gpudata))
+            
+        
+    
+
 # @profile
 def batch_tps_rpm_bij(src_ctx, tgt_ctx, T_init = 4e-1, T_final = 4e-4, 
                       outlierfrac = 1e-2, outlierprior = 1e-1, outliercutoff = 1e-2, em_iter = EM_ITER_CHEAP):
@@ -286,7 +341,7 @@ def parse_arguments():
     parser.add_argument("--input_file", type=str, default='../data/actions.h5')
     parser.add_argument("--sync", action='store_true')
     return parser.parse_args()
-
+# @profile
 def main():
     args = parse_arguments()
     Globals.sync = args.sync
@@ -296,12 +351,17 @@ def main():
     tgt_cld = downsample_cloud(f['demo1-seg00']['cloud_xyz'][:])
     f.close()
     scaled_tgt_cld, _ = unit_boxify(tgt_cld)
-    for i in range(20):
+    tgt_ctx = TgtContext(src_ctx)
+    times = []
+    for i in range(10):
         start = time.time()
-        tgt_ctx = src_ctx.setup_tgt_ctx(scaled_tgt_cld)
+        tgt_ctx.set_cld(scaled_tgt_cld)
         batch_tps_rpm_bij(src_ctx, tgt_ctx)
-        tgt_ctx.pts[0].get()
-        print "Batch Computation Complete, Time Taken is {}".format(time.time() - start)
+        tgt_ctx.tps_params[0].get()
+        time_taken = time.time() - start
+        times.append(time_taken)
+        print "Batch Computation Complete, Time Taken is {}".format(time_taken)
+    print "Mean Compute Time is {}".format(np.mean(times))
 
 if __name__ == "__main__":
     main()

@@ -4,7 +4,11 @@ from string import lower, upper
 import numpy as np
 
 def get_gpu_ptrs(arr, (m, n) = (0, 0)):
-    ptrs = [int(x[m:, n:].gpudata) for x in arr]
+    shape = arr[0].shape
+    if len(shape) == 1:        
+        ptrs = [int(x[m:].gpudata) for x in arr]
+    else:
+        ptrs = [int(x[m:, n:].gpudata) for x in arr]
     return gpuarray.to_gpu(np.array(ptrs))
 
 def m_dot_batch(*args):

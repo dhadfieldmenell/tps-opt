@@ -25,6 +25,15 @@ void pyFillMat(py::object dest, py::object val, py::object dims, int N){
   fillMat(dest_ptr, val_ptr, dims_ptr, N);
 }
 
+void pyCorrReduce(py::object d1, py::object d2, py::object out,
+		  float T, int N){
+  float** d1_ptr  = getGPUPointer<float*>(d1);
+  float** d2_ptr  = getGPUPointer<float*>(d2);
+  float** out_ptr = getGPUPointer<float*>(out);
+
+  corrReduce(d1_ptr, d2_ptr, out_ptr, T, N);
+}
+
 void pyInitProbNM(py::object x, py::object y, py::object xw, py::object yw, 
 		  py::object xdims, py::object ydims, int N,
 		  float outlier_prior, float r, 
@@ -47,21 +56,27 @@ void pyInitProbNM(py::object x, py::object y, py::object xw, py::object yw,
 	     outlier_prior, r, corr_ptr_cm, corr_ptr_rm);
 }
 
-void pyNormProbNM(py::object corr_cm, py::object corr_rm, py::object xdims, 
-		  py::object ydims, int N, float outlier_frac, int norm_iters){
+void pyNormProbNM(py::object corr_cm, py::object corr_rm, py::object xdims,
+		  py::object ydims, int N, float outlier_frac, int norm_iters,
+		  py::object row_coeffs, py::object rn_col_coeffs, py::object cn_col_coeffs){
 
   float** corr_ptr_cm = getGPUPointer<float*>(corr_cm);
   float** corr_ptr_rm = getGPUPointer<float*>(corr_rm);
+ 
+  float** r_c      = getGPUPointer<float*>(row_coeffs);
+  float** rn_c_c   = getGPUPointer<float*>(rn_col_coeffs);
+  float** cn_c_c   = getGPUPointer<float*>(cn_col_coeffs);
 
   int* xdims_ptr  = getGPUPointer<int>(xdims);
   int* ydims_ptr  = getGPUPointer<int>(ydims);
 
   normProbNM(corr_ptr_cm, corr_ptr_rm, xdims_ptr, ydims_ptr, 
-	     N, outlier_frac, norm_iters);
+	     N, outlier_frac, norm_iters, r_c, rn_c_c, cn_c_c);
 }
 
 void pyGetTargPts(py::object x, py::object y, py::object xw, py::object yw, 
 		  py::object corr_cm, py::object corr_rm ,
+		  py::object row_coeffs, py::object rn_col_coeffs, py::object cn_col_coeffs,
 		  py::object xdims, py::object ydims, float cutoff,
 		  int N, py::object xt, py::object yt){
   /*
@@ -78,11 +93,16 @@ void pyGetTargPts(py::object x, py::object y, py::object xw, py::object yw,
 
   float** corr_ptr_cm = getGPUPointer<float*>(corr_cm);
   float** corr_ptr_rm = getGPUPointer<float*>(corr_rm);
+ 
+  float** r_c      = getGPUPointer<float*>(row_coeffs);
+  float** rn_c_c   = getGPUPointer<float*>(rn_col_coeffs);
+  float** cn_c_c   = getGPUPointer<float*>(cn_col_coeffs);
+
 
   float** xt_ptr = getGPUPointer<float*>(xt);
   float** yt_ptr = getGPUPointer<float*>(yt);
 
-  getTargPts(x_ptr, y_ptr, xw_ptr, yw_ptr, corr_ptr_cm, corr_ptr_rm, 
+  getTargPts(x_ptr, y_ptr, xw_ptr, yw_ptr, corr_ptr_cm, corr_ptr_rm, r_c, rn_c_c, cn_c_c,
 	     xdims_ptr, ydims_ptr, cutoff, N, xt_ptr, yt_ptr);
 }
 
@@ -90,11 +110,19 @@ void pyCheckCudaErr(){
   checkCudaErr();
 }
 
+void pyResetDevice(){
+  resetDevice();
+}
+
 BOOST_PYTHON_MODULE(cuda_funcs) {
   py::def("float_gpu_print_arr", &pyFloatPrintArr, (py::arg("x"), py::arg("N")));
   py::def("int_gpu_print_arr", &pyIntPrintArr, (py::arg("x"), py::arg("N")));
 
   py::def("fill_mat", &pyFillMat, (py::arg("dest"), py::arg("vals"), py::arg("dims"), py::arg("N")));
+
+  py::def("corr_reduce", &pyCorrReduce, (py::arg("d1"), py::arg("d2"), py::arg("out"), 
+					 py::arg("T"), py::arg("N")));
+ 
 
   py::def("init_prob_nm", &pyInitProbNM, (py::arg("x"), py::arg("y"), py::arg("xw"), py::arg("yw"), 
 					  py::arg("xdims"), py::arg("ydims"), py::arg("N"), 
@@ -104,12 +132,16 @@ BOOST_PYTHON_MODULE(cuda_funcs) {
   py::def("norm_prob_nm", &pyNormProbNM, (py::arg("corr_cm"), py::arg("corr_rm"),
 					  py::arg("xdims"), py::arg("ydims"), 
 					  py::arg("N"), py::arg("outlier_frac"), 
-					  py::arg("norm_iters")));
+					  py::arg("norm_iters"), py::arg("row_coeffs"),
+					  py::arg("rn_col_coeffs"), py::arg("cn_col_coeffs")));
 
   py::def("get_targ_pts", &pyGetTargPts, (py::arg("x"), py::arg("y"), py::arg("xw"), py::arg("yw"), 
-					  py::arg("corr_cm"), py::arg("corr_rm"),
+					  py::arg("corr_cm"), py::arg("corr_rm"), 
+					  py::arg("row_coeffs"), py::arg("rn_col_coeffs"), 
+					  py::arg("cn_col_coeffs"),
 					  py::arg("xdims"), py::arg("ydims"), 
 					  py::arg("outlier_cutoff"), py::arg("N"), 
 					  py::arg("xt"), py::arg("yt")));
   py::def("check_cuda_err", &pyCheckCudaErr);
+  py::def("reset_cuda", &pyResetDevice);
 }

@@ -53,7 +53,7 @@ def tps_kernel_matrix2(x_na, y_ma):
     return tps_apply_kernel(distmat, dim)
 
 def tps_eval(x_ma, lin_ag, trans_g, w_ng, x_na):
-    K_mn = tps_kernel_matrix2(x_ma, x_na)
+    K_mn = tps_kernel_matrix2(x_ma, x_na).astype(np.float32)
     return np.dot(K_mn, w_ng) + np.dot(x_ma, lin_ag) + trans_g[None,:]
 
 def tps_grad(x_ma, lin_ag, _trans_g, w_ng, x_na):

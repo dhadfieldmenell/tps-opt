@@ -83,6 +83,23 @@ __global__ void _fillMat(float* dest_ptr[], float* val_ptr[], int* dims){
   }    
 }
 
+__global__ void _corrReduce(float* d1_ptr[], float* d2_ptr[], float* out_ptr[], float T){
+  /* Takes pointers to two arrays of pairwise distances b/t forward and backward
+   * warps. Puts the result in out_ptr
+   * Called with 1 block/ptr and MAX_DIM threads
+   */
+  int tix = threadIdx.x; int bix = blockIdx.x;
+  int ind;
+  float *d1, *d2, *out;
+  d1  = d1_ptr[bix];
+  d2  = d2_ptr[bix];
+  out = out_ptr[bix];
+  for (int i = 0; i < MAX_DIM; ++i){
+    ind = rMInd(i, tix, MAX_DIM);
+    out[ind] = exp( ( -1 * sqrt(d1[ind]) - sqrt(d2[ind])) / ( (float) 2 * T));
+  }
+}
+
 __global__ void _initProbNM(float* x_ptr[], float* y_ptr[], float* xw_ptr[], float* yw_ptr[], 
 			    int* xdims, int* ydims, float p, float r, int N, 
 			    float* corr_ptr_cm[], float* corr_ptr_rm[]) {
@@ -124,7 +141,7 @@ __global__ void _initProbNM(float* x_ptr[], float* y_ptr[], float* xw_ptr[], flo
       s_xw[rMInd(tix, i, DATA_DIM)] = xw[rMInd(tix, i, DATA_DIM)];
     }
   }
-  if (tix < DATA_DIM){
+  if (tix < MAX_DIM){
     for (int i = 0; i < DATA_DIM; ++i){
       s_y[rMInd(tix, i, DATA_DIM)]  = y[rMInd(tix, i, DATA_DIM)];
       s_yw[rMInd(tix, i, DATA_DIM)] = yw[rMInd(tix, i, DATA_DIM)];
@@ -171,7 +188,7 @@ __global__ void _initProbNM(float* x_ptr[], float* y_ptr[], float* xw_ptr[], flo
     dist_ji += sqrt(tmp);
 
     if (tix < xdim) corr_cm[cMInd(tix, j, n_corr_r)] = exp( -1 * dist_ij / (float) (2 * r));
-    if (tix < ydim) corr_rm[rMInd(j, tix, n_corr_c)] = exp( -1 * dist_ji / (float) (2 * r));      
+    if (tix < ydim) corr_rm[rMInd(j, tix, n_corr_c)] = exp( -1 * dist_ji / (float) (2 * r));
   }
   if (tix < xdim) {
     corr_cm[cMInd(tix, ydim, n_corr_r)] = p;
@@ -185,7 +202,8 @@ __global__ void _initProbNM(float* x_ptr[], float* y_ptr[], float* xw_ptr[], flo
 
 
 __global__ void _normProbNM(float* corr_ptr_cm[], float* corr_ptr_rm[], int* xdims, int* ydims,
-			    int N, float outlierfrac, int norm_iters){
+			    int N, float outlierfrac, int norm_iters, 
+			    float* row_c_res[], float* cm_col_c_res[], float* rm_col_c_res[]){
   /*  row - column normalizes prob_nm
    *  Launch with 1 block per matrix, store xdims, ydims, stride, N in constant memory
    *  Thread.idx governs which row/column to normalize
@@ -204,63 +222,72 @@ __global__ void _normProbNM(float* corr_ptr_cm[], float* corr_ptr_rm[], int* xdi
    */
   //set up shared variables to be read once
   __shared__ int n_corr_r, n_corr_c;
-  __shared__ float *corr_rm, *corr_cm;
+  __shared__ float *corr_rm, *corr_cm, *row_c, *cm_col_c, *rm_col_c;
   __shared__ float col_coeffs[MAX_DIM], row_coeffs[MAX_DIM];
-  float r_sum, c_sum; int ix_r, ix_c;
+  float r_sum, c_sum, r_tgt, c_tgt;
   int bix = blockIdx.x; int tix = threadIdx.x;
   if (tix == 0) { 
     n_corr_r = xdims[bix] + 1;
     n_corr_c = ydims[bix] + 1;
     corr_cm = corr_ptr_cm[bix];
     corr_rm = corr_ptr_rm[bix];
+
+    row_c    = row_c_res[bix];
+    cm_col_c = cm_col_c_res[bix];
+    rm_col_c = rm_col_c_res[bix];
   }
   row_coeffs[tix] = 1;
   col_coeffs[tix] = 1;
   __syncthreads();
-
+  if (tix == n_corr_r-1){
+    r_tgt = ((float) (n_corr_c-1)) * outlierfrac;
+  } else{
+    r_tgt = 1;
+  }
+  if (tix == n_corr_c-1){
+    c_tgt = ((float) (n_corr_r-1)) * outlierfrac;
+  } else{
+    c_tgt = 1;
+  }
+  c_sum = c_tgt;
   //do normalization
   for(int ctr = 0; ctr < norm_iters; ++ctr){
+    if (tix < n_corr_c){
+      //sum cols and divide      
+      col_coeffs[tix] = c_tgt / c_sum;
+    }
+    __syncthreads();
     r_sum = 0;
-    c_sum = 0;
     if (tix < n_corr_r){
       //sum rows and divide
       for (int i = 0; i < n_corr_c; ++i) {
   	r_sum = r_sum + corr_cm[cMInd(tix, i, n_corr_r)] * col_coeffs[i];
       }
-      if (tix == n_corr_r - 1) {
-  	row_coeffs[threadIdx.x] = ((n_corr_c-1) * outlierfrac) / r_sum;
-      } else {
-  	row_coeffs[threadIdx.x] = 1 / r_sum;
-      } 
+      row_coeffs[tix] = r_tgt / r_sum;
     }
     __syncthreads();
     if (tix < n_corr_c){
-      //sum cols and divide
+      c_sum = 0;
       for (int i = 0; i < n_corr_r; ++i) {
   	c_sum = c_sum + corr_rm[rMInd(i, tix, n_corr_c)] * row_coeffs[i];
       }
-      if (tix == n_corr_c - 1) {
-  	col_coeffs[tix] = ((n_corr_r-1) * outlierfrac) / c_sum;
-      } else {
-  	col_coeffs[tix] = 1 / c_sum;
-      } 
     }
-    __syncthreads();
   }
   //copy results back
-  for(int i = 0; i < MAX_DIM; ++i){
-    ix_r = rMInd(i, tix, n_corr_c);
-    ix_c = cMInd(tix, i, n_corr_r);
-    if (tix < n_corr_c && i < n_corr_r) {
-      corr_rm[ix_r] = corr_rm[ix_r] * row_coeffs[i] * col_coeffs[tix];
-    } if (tix < n_corr_r && i < n_corr_c) {
-      corr_cm[ix_c] = corr_cm[ix_c] * row_coeffs[tix] * col_coeffs[i];
-    }
-  }
+  //corr_cm row-normalized
+  //corr_rm column-normalized
+  //row coefficients stored in corr[MAX_DIM, :]
+  //column coefficients stored in corr[:, MAX_DIM]
+  //row_coeffs * col_coeffs is row normalizer
+  //row_coeffs * col_sums is column normalizer
+  row_c[tix]    = row_coeffs[tix];
+  cm_col_c[tix] = col_coeffs[tix];
+  rm_col_c[tix] = c_tgt/c_sum;
 }
 
 __global__ void  _getTargPts(float* x_ptr[], float* y_ptr[], float* xw_ptr[], float*yw_ptr[],
 			     float* corr_ptr_cm[], float* corr_ptr_rm[],
+			     float* row_c_ptrs[], float* cm_col_c_ptrs[], float* rm_col_c_ptrs[],
 			     int* xdims, int* ydims, float cutoff,
 			     int N, float* xt_ptr[], float* yt_ptr[]){
   /*  Computes the target points for x and y when warped
@@ -273,7 +300,7 @@ __global__ void  _getTargPts(float* x_ptr[], float* y_ptr[], float* xw_ptr[], fl
    *  3. Update xt with correct value (0 pad other areas
    *  4. Norm cols of corr, detect target outliers
    *  5. Update yt with correct value (0 pad other areas
-   * Timing -- memory/compute limited
+   *  Timing -- memory/compute limited
    *    -  Minimal Memory Accesses:       875.12us
    *    -  Only Reading x/y into s:       748.21us
    *    -  Reading the sum:               711.14us (Why is this so much faster)
@@ -283,20 +310,23 @@ __global__ void  _getTargPts(float* x_ptr[], float* y_ptr[], float* xw_ptr[], fl
    */
   __shared__ int xdim, ydim; int n_corr_r, n_corr_c;
   __shared__ float s_y[MAX_DIM * DATA_DIM], s_x[MAX_DIM * DATA_DIM];
-  __shared__ float *x, *y, *xw, *yw, *xt, *yt, *corr_rm, *corr_cm;
-  int tix = threadIdx.x; int bix = blockIdx.x;
-  float targ;
+  __shared__ float *x, *y, *xw, *yw, *xt, *yt, *corr_rm, *corr_cm, *row_c, *cm_col_c, *rm_col_c;
+  int tix = threadIdx.x; int bix = blockIdx.x;  
+  float targ0, targ1, targ2;
   if (threadIdx.x == 0){
-    xdim = xdims[bix];
-    ydim = ydims[bix];
-    x = x_ptr[bix];
-    y = y_ptr[bix];
-    xw = xw_ptr[bix];
-    yw = yw_ptr[bix];
-    xt = xt_ptr[bix];
-    yt = yt_ptr[bix];
-    corr_cm = corr_ptr_cm[bix];
-    corr_rm = corr_ptr_rm[bix];
+    xdim     = xdims[bix];
+    ydim     = ydims[bix];
+    x        = x_ptr[bix];
+    y        = y_ptr[bix];
+    xw       = xw_ptr[bix];
+    yw       = yw_ptr[bix];
+    xt       = xt_ptr[bix];
+    yt       = yt_ptr[bix];
+    corr_cm  = corr_ptr_cm[bix];
+    corr_rm  = corr_ptr_rm[bix];
+    row_c    = row_c_ptrs[bix];
+    cm_col_c = cm_col_c_ptrs[bix];
+    rm_col_c = rm_col_c_ptrs[bix];
   }
   __syncthreads();  
   n_corr_r = xdim + 1; n_corr_c = ydim + 1;
@@ -314,48 +344,44 @@ __global__ void  _getTargPts(float* x_ptr[], float* y_ptr[], float* xw_ptr[], fl
   __syncthreads();
 
   if (tix < xdim){
-    float r_sum = 0; 
-    for(int i = 0; i < ydim; ++i){
-      r_sum = r_sum + corr_cm[cMInd(tix, i, n_corr_r)];
-    }
     //if the point is an outlier map it to its current warp
-    if (r_sum < cutoff){      
+    if (1/row_c[tix] < cutoff){      
       for(int i = 0; i < DATA_DIM; ++i){	
     	xt[rMInd(tix, i, DATA_DIM)] = xw[rMInd(tix, i, DATA_DIM)];
       }
     } else {
-      for(int i = 0; i < DATA_DIM; ++i){
-    	targ = 0;
-    	for(int j = 0; j < ydim; ++j){
-    	  targ = targ + corr_cm[cMInd(tix, j, n_corr_r)] 
-    	    * s_y[rMInd(j, i, DATA_DIM)] / r_sum;
-    	}
-    	xt[rMInd(tix, i, DATA_DIM)] = targ;
+      targ0 = 0; targ1 = 0; targ2 = 0;
+      for(int j = 0; j < ydim; ++j){
+	targ0 = targ0 + corr_cm[cMInd(tix, j, n_corr_r)] * cm_col_c[j]
+	  * s_y[rMInd(j, 0, DATA_DIM)] ;
+	targ1 = targ1 + corr_cm[cMInd(tix, j, n_corr_r)] * cm_col_c[j]
+	  * s_y[rMInd(j, 1, DATA_DIM)] ;
+	targ2 = targ2 + corr_cm[cMInd(tix, j, n_corr_r)] * cm_col_c[j]
+	  * s_y[rMInd(j, 2, DATA_DIM)] ;
       }
-    }
-  } else if (tix < MAX_DIM){
-    for(int i = 0; i < DATA_DIM; ++i){
-      xt[rMInd(tix, i, DATA_DIM)] = 0;
+      xt[rMInd(tix, 0, DATA_DIM)] = targ0 * row_c[tix];
+      xt[rMInd(tix, 1, DATA_DIM)] = targ1 * row_c[tix];
+      xt[rMInd(tix, 2, DATA_DIM)] = targ2 * row_c[tix];
     }
   }
   if (tix < ydim){
-    float c_sum = 0; 
-    for(int i = 0; i < xdim; ++i){
-      c_sum = c_sum + corr_rm[rMInd(i, tix, n_corr_c)];
-    }
-    if (c_sum < cutoff){
+    if (1/rm_col_c[tix] < cutoff){
       for(int i = 0; i < DATA_DIM; ++i){
   	yt[rMInd(tix, i, DATA_DIM)] = yw[rMInd(tix, i, DATA_DIM)];
       }
     } else {
-      for(int i = 0; i < DATA_DIM; ++i){
-  	targ = 0;
-  	for(int j = 0; j < xdim; ++j){
-  	  targ = targ + corr_rm[rMInd(j, tix, n_corr_c)] 
-  	    * s_x[rMInd(j, i, DATA_DIM)] / c_sum;
-  	}
-  	yt[rMInd(tix, i, DATA_DIM)] = targ;
+      targ0 = 0; targ1 = 0; targ2 = 0;
+      for(int j = 0; j < xdim; ++j){
+	targ0 = targ0 + corr_rm[rMInd(j, tix, n_corr_c)] * row_c[j]
+	  * s_x[rMInd(j, 0, DATA_DIM)];
+	targ1 = targ1 + corr_rm[rMInd(j, tix, n_corr_c)] * row_c[j]
+	  * s_x[rMInd(j, 1, DATA_DIM)];
+	targ2 = targ2 + corr_rm[rMInd(j, tix, n_corr_c)] * row_c[j]
+	  * s_x[rMInd(j, 2, DATA_DIM)];
       }
+      yt[rMInd(tix, 0, DATA_DIM)] = targ0 * rm_col_c[tix];
+      yt[rMInd(tix, 1, DATA_DIM)] = targ1 * rm_col_c[tix];
+      yt[rMInd(tix, 2, DATA_DIM)] = targ2 * rm_col_c[tix];
     }
   } else if (tix < MAX_DIM){
     for(int i = 0; i < DATA_DIM; ++i){
@@ -395,6 +421,10 @@ void fillMat(float* dest_ptr[], float* val_ptr[], int* dims, int N){
   _fillMat<<<n_blocks, n_threads>>>(dest_ptr, val_ptr, dims);
 }
 
+void corrReduce(float* d1_ptr[], float* d2_ptr[], float* out_ptr[], float T, int N){
+  _corrReduce<<<N, MAX_DIM>>>(d1_ptr, d2_ptr, out_ptr, T);
+}
+
 void initProbNM(float* x[], float* y[], float* xw[], float* yw[],
 		int N, int* xdims, int* ydims, float outlier_prior, 
 		float r, float* corr_cm[], float* corr_rm[]){
@@ -406,23 +436,27 @@ void initProbNM(float* x[], float* y[], float* xw[], float* yw[],
 }
 
 void normProbNM(float* corr_cm[], float* corr_rm[], int* xdims, int* ydims, int N, 
-		float outlier_frac, int norm_iters){
+		float outlier_frac, int norm_iters,
+		float* row_c_res[], float* cm_col_c_res[], float* rm_col_c_res[]){
   int n_blocks = N;
   int n_threads = MAX_DIM;
   // printf("Launching Normalization Kernel with %i blocks and %i threads\n", n_blocks, n_threads);
   _normProbNM<<<n_blocks, n_threads>>>(corr_cm, corr_rm, xdims, ydims, 
-				       N, outlier_frac, norm_iters);
+				       N, outlier_frac, norm_iters,
+				       row_c_res, cm_col_c_res, rm_col_c_res);
 }
 
 
 void getTargPts(float* x[], float* y[], float* xw[], float* yw[], 
 		float* corr_cm[], float* corr_rm[], 
+		float* row_c_ptrs[], float* cm_col_c_ptrs[], float* rm_col_c_ptrs[],
 		int* xdims, int* ydims, float cutoff, int N,
 		float* xt[], float* yt[]){
   int n_blocks = N;
   int n_threads = MAX_DIM;
   // printf("Launching Get Targ Pts Kernel with %i blocks and %i threads\n", n_blocks, n_threads);
-  _getTargPts<<<n_blocks, n_threads>>>(x, y, xw, yw, corr_cm, corr_rm, xdims, ydims, 
+  _getTargPts<<<n_blocks, n_threads>>>(x, y, xw, yw, corr_cm, corr_rm, 
+				       row_c_ptrs, cm_col_c_ptrs, rm_col_c_ptrs, xdims, ydims, 
 				       cutoff, N, xt, yt);
 }
 
@@ -434,5 +468,14 @@ void checkCudaErr(){
     cudaDeviceReset();
     exit(1);
   }
-  printf("No Error Detected!!\n");
+}
+void resetDevice(){
+  cudaDeviceSynchronize();
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess){
+    printf("Error Detected:\t%s\n", cudaGetErrorString(err));
+    cudaDeviceReset();
+    exit(1);
+  }
+  cudaDeviceReset();
 }

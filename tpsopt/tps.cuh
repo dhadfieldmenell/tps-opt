@@ -12,16 +12,21 @@ void gpuPrintArr(int* x, int N);
 
 void fillMat(float* dest_ptr[], float* val_ptr[], int* dims, int N);
 
+void corrReduce(float* d1_ptr[], float* d2_ptr[], float* out_ptr[], float T, int N);
+
 void initProbNM(float* x[], float* y[], float* xw[], float* yw[],
 		int N, int* xdims, int* ydims, float outlier_prior, 
 		float r, float* corr_cm[], float* corr_rm[]);
-
 void normProbNM(float* corr_cm[], float* corr_rm[], int* xdims, int* ydims, int N, 
-		float outlier_frac, int norm_iters);
+		float outlier_frac, int norm_iters,
+		float* row_c_res[], float* cm_col_c_res[], float* rm_col_c_res[]);
 
 void getTargPts(float* x[], float* y[], float* xw[], float* yw[], 
 		float* corr_cm[], float* corr_rm[], 
+		float* row_c_ptrs[], float* cm_col_c_ptrs[], float* rm_col_c_ptrs[],
 		int* xdims, int* ydims, float cutoff, int N,
 		float* xt[], float* yt[]);
 
 void checkCudaErr();
+
+void resetDevice();

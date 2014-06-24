@@ -79,7 +79,7 @@ def batch_get_sol_params(x_nd, K_nn, bend_coefs, rot_coef=np.r_[1e-4, 1e-4, 1e-1
                                            (N_arr_gpu, N_ptr_gpu, 'N'))
     iH_arr = []
     for NHN in NHN_arr_gpu:
-        iH_arr.append(scipy.linalg.inv(NHN.get()))
+        iH_arr.append(scipy.linalg.inv(NHN.get()).copy())
     iH_arr_gpu = [gpuarray.to_gpu_async(iH) for iH in iH_arr]
     iH_ptr_gpu = get_gpu_ptrs(iH_arr_gpu)
 

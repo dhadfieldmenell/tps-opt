@@ -12,6 +12,8 @@ void gpuPrintArr(int* x, int N);
 
 void fillMat(float* dest_ptr[], float* val_ptr[], int* dims, int N);
 
+void sqDiffMat(float* x_ptr[], float* y_ptr[], float* z, int N, bool overwrite);
+
 void corrReduce(float* d1_ptr[], float* d2_ptr[], float* out_ptr[], float T, int N);
 
 void initProbNM(float* x[], float* y[], float* xw[], float* yw[],

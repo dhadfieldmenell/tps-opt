@@ -83,6 +83,31 @@ __global__ void _fillMat(float* dest_ptr[], float* val_ptr[], int* dims){
   }    
 }
 
+__global__ void _sqDiffMat(float* x_ptr[], float* y_ptr[], float* z, bool overwrite){
+  /*
+   * called with 1 block per item comparison, 1 thread per row
+   * computes the pointwise sum of squared differences for 
+   * the vectors pointed to by x and y
+   * the result is added to the float pointed to by res[bix]
+   */
+  int tix = threadIdx.x; int bix = blockIdx.x; int zix = rMInd(bix, tix, MAX_DIM);
+  float *x, *y, diff, sum;
+  x = x_ptr[bix]; y = y_ptr[bix];
+  sum = 0;
+  int ind = rMInd(tix, 0, DATA_DIM);  
+  for (int i = 0; i < DATA_DIM; ++i){
+    diff = x[ind + i] - y[ind + i];
+    sum += diff * diff;
+  }
+  if (overwrite){
+    z[zix] = sum;
+  }
+  else {
+    z[zix] += sum;
+  }
+}
+
+
 __global__ void _corrReduce(float* d1_ptr[], float* d2_ptr[], float* out_ptr[], float T){
   /* Takes pointers to two arrays of pairwise distances b/t forward and backward
    * warps. Puts the result in out_ptr
@@ -421,8 +446,8 @@ void fillMat(float* dest_ptr[], float* val_ptr[], int* dims, int N){
   _fillMat<<<n_blocks, n_threads>>>(dest_ptr, val_ptr, dims);
 }
 
-void corrReduce(float* d1_ptr[], float* d2_ptr[], float* out_ptr[], float T, int N){
-  _corrReduce<<<N, MAX_DIM>>>(d1_ptr, d2_ptr, out_ptr, T);
+void sqDiffMat(float* x_ptr[], float* y_ptr[], float* z, int N, bool overwrite){
+  _sqDiffMat<<<N, MAX_DIM>>>(x_ptr, y_ptr, z, overwrite);
 }
 
 void initProbNM(float* x[], float* y[], float* xw[], float* yw[],

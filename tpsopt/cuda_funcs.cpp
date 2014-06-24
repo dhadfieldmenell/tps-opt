@@ -25,13 +25,12 @@ void pyFillMat(py::object dest, py::object val, py::object dims, int N){
   fillMat(dest_ptr, val_ptr, dims_ptr, N);
 }
 
-void pyCorrReduce(py::object d1, py::object d2, py::object out,
-		  float T, int N){
-  float** d1_ptr  = getGPUPointer<float*>(d1);
-  float** d2_ptr  = getGPUPointer<float*>(d2);
-  float** out_ptr = getGPUPointer<float*>(out);
-
-  corrReduce(d1_ptr, d2_ptr, out_ptr, T, N);
+void pySqDiffMat(py::object x, py::object y, py::object z, int N, bool overwrite){
+  float** x_ptr   = getGPUPointer<float*>(x);
+  float** y_ptr   = getGPUPointer<float*>(y);
+  float* z_ptr = getGPUPointer<float>(z);
+  
+  sqDiffMat(x_ptr, y_ptr, z_ptr, N, overwrite);
 }
 
 void pyInitProbNM(py::object x, py::object y, py::object xw, py::object yw, 
@@ -120,9 +119,7 @@ BOOST_PYTHON_MODULE(cuda_funcs) {
 
   py::def("fill_mat", &pyFillMat, (py::arg("dest"), py::arg("vals"), py::arg("dims"), py::arg("N")));
 
-  py::def("corr_reduce", &pyCorrReduce, (py::arg("d1"), py::arg("d2"), py::arg("out"), 
-					 py::arg("T"), py::arg("N")));
- 
+  py::def("sq_diffs", &pySqDiffMat, (py::arg("x"), py::arg("y"), py::arg("z"), py::arg("N"), py::arg("overwrite")));
 
   py::def("init_prob_nm", &pyInitProbNM, (py::arg("x"), py::arg("y"), py::arg("xw"), py::arg("yw"), 
 					  py::arg("xdims"), py::arg("ydims"), py::arg("N"), 

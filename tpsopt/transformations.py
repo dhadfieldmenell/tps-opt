@@ -1,4 +1,5 @@
 import tps
+import numpy as np
 
 def unit_boxify(x_na):    
     ranges = x_na.ptp(axis=0)
@@ -137,4 +138,11 @@ def fit_ThinPlateSpline(x_na, y_ng, bend_coef=.1, rot_coef = 1e-5, wt_n=None):
     f = ThinPlateSpline()
     f.lin_ag, f.trans_g, f.w_ng = tps.tps_fit3(x_na, y_ng, bend_coef, rot_coef, wt_n)
     f.x_na = x_na
-    return f        
+    return f
+
+def set_ThinPlateSpline(f, x_na, theta):
+    f.x_na = x_na
+    d = x_na.shape[1]
+    f.trans_g = theta[0]
+    f.lin_ag  = theta[1:d+1]
+    f.w_ng    = theta[d+1:]

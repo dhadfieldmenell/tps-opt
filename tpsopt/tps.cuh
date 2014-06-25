@@ -17,8 +17,9 @@ void sqDiffMat(float* x_ptr[], float* y_ptr[], float* z, int N, bool overwrite);
 void corrReduce(float* d1_ptr[], float* d2_ptr[], float* out_ptr[], float T, int N);
 
 void initProbNM(float* x[], float* y[], float* xw[], float* yw[],
-		int N, int* xdims, int* ydims, float outlier_prior, 
-		float r, float* corr_cm[], float* corr_rm[]);
+		int N, int* xdims, int* ydims, float outlierprior, float outlierfrac,
+		float T, float* corr_cm[], float* corr_rm[]);
+
 void normProbNM(float* corr_cm[], float* corr_rm[], int* xdims, int* ydims, int N, 
 		float outlier_frac, int norm_iters,
 		float* row_c_res[], float* cm_col_c_res[], float* rm_col_c_res[]);

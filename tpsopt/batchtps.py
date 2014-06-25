@@ -16,6 +16,7 @@ from transformations import unit_boxify
 from culinalg_exts import dot_batch_nocheck, get_gpu_ptrs, m_dot_batch, extract_cols, batch_sum
 from precompute import downsample_cloud, batch_get_sol_params
 from cuda_funcs import init_prob_nm, norm_prob_nm, get_targ_pts, check_cuda_err, fill_mat, reset_cuda, sq_diffs
+from registration import registration_cost as cpu_registration_cost
 
 import IPython as ipy
 from pdb import pm, set_trace
@@ -23,11 +24,12 @@ import time
 
 N_ITER_CHEAP = 10
 EM_ITER_CHEAP = 1
-DEFAULT_LAMBDA = (10, .1)
+DEFAULT_LAMBDA = (.1, .001)
 MAX_CLD_SIZE = 150
 DATA_DIM = 3
 DS_SIZE = 0.025
 N_STREAMS = 10
+DEFAULT_NORM_ITERS = 10
 
 class Globals:
     sync = False
@@ -275,7 +277,7 @@ class GPUContext(object):
     
     # @profile
     def get_target_points(self, other, outlierprior=1e-1, outlierfrac=1e-2, outliercutoff=1e-2, 
-                          T = 5e-3, norm_iters = 10):
+                          T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         """
         computes the target points for self and other
         using the current warped points for both                
@@ -283,9 +285,8 @@ class GPUContext(object):
         init_prob_nm(self.pt_ptrs, other.pt_ptrs, 
                      self.pt_w_ptrs, other.pt_w_ptrs, 
                      self.dims_gpu, other.dims_gpu,
-                     self.N, outlierprior, T, 
+                     self.N, outlierprior, outlierfrac, T, 
                      self.corr_cm_ptrs, self.corr_rm_ptrs)
-        # print "corr_pts", self.corr_cm[0][:3]
         sync()
         norm_prob_nm(self.corr_cm_ptrs, self.corr_rm_ptrs, 
                      self.dims_gpu, other.dims_gpu, self.N, outlierfrac, norm_iters,
@@ -311,18 +312,18 @@ class GPUContext(object):
         sync()
     # @profile
     def mapping_cost(self, other, bend_coeff=DEFAULT_LAMBDA[1], outlierprior=1e-1, outlierfrac=1e-2, 
-                       outliercutoff=1e-2,  T = 5e-3, norm_iters = 10):
-        self.get_target_points(other, outlierprior, outlierfrac, outliercutoff, T, norm_iters)
-        res = np.zeros(self.N, dtype=np.float32)
+                       outliercutoff=1e-2,  T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
+        """
+        computes the error in the current mapping
+        assumes that the target points have already been filled
+        """
+        self.transform_points()
+        other.transform_points()
         sums = []
         sq_diffs(self.pt_w_ptrs, self.pt_t_ptrs, self.warp_err, self.N, True)
         sq_diffs(other.pt_w_ptrs, other.pt_t_ptrs, self.warp_err, self.N, False)
         warp_err = self.warp_err.get()
         return np.sum(warp_err, axis=1)
-        # sync(override=True)        
-        # for i in range(self.N):
-        #     sums.append(gpuarray.sum(self.warp_errs[i], stream= get_stream(i)))
-        # return [s.get() for s in sums]
     # @profile
     def bending_cost(self, b=DEFAULT_LAMBDA[1]):
         ## b * w_nd' * K * w_nd
@@ -337,8 +338,8 @@ class GPUContext(object):
         bend_res = self.bend_res_mat.get()        
         return b * np.array([np.trace(bend_res[i*DATA_DIM:(i+1)*DATA_DIM]) for i in range(self.N)])
     # @profile
-    def bidir_tps_cost(self, other, bend_coeff=DEFAULT_LAMBDA[1], outlierprior=1e-1, outlierfrac=1e-2, 
-                       outliercutoff=1e-2,  T = 5e-3, norm_iters = 10):
+    def bidir_tps_cost(self, other, bend_coeff=1, outlierprior=1e-1, outlierfrac=1e-2, 
+                       outliercutoff=1e-2,  T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         self.reset_warp_err()
         mapping_err  = self.mapping_cost(other, outlierprior, outlierfrac, outliercutoff, T, norm_iters)
         bending_cost = self.bending_cost(bend_coeff)
@@ -350,7 +351,7 @@ class GPUContext(object):
     """
 
     def test_mapping_cost(self, other, bend_coeff=DEFAULT_LAMBDA[1], outlierprior=1e-1, outlierfrac=1e-2, 
-                       outliercutoff=1e-2,  T = 5e-3, norm_iters = 10):
+                       outliercutoff=1e-2,  T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         mapping_err = self.mapping_cost(other, outlierprior, outlierfrac, outliercutoff, T, norm_iters)
         for i in range(self.N):
             ## compute error for 0 on cpu
@@ -362,17 +363,18 @@ class GPUContext(object):
             yt = other.pts_t[i].get()
             yw = other.pts_w[i].get()
             
-            s_cpu += np.sum((xt - xw)**2)
-            s_cpu += np.sum((yt - yw)**2)
+            ##use the trace b/c then numpy will use float32s all the way
+            s_cpu += np.trace(xt.T.dot(xt) + xw.T.dot(xw) - 2 * xw.T.dot(xt))
+            s_cpu += np.trace(yt.T.dot(yt) + yw.T.dot(yw) - 2 * yw.T.dot(yt))
             
-            if np.abs(s_cpu - s_gpu) > 1e-4:
+            if not np.isclose(s_cpu, s_gpu, atol=1e-4):
                 ## high err tolerance is b/c of difference in cpu and gpu precision?
                 print "cpu and gpu sum sq differences differ!!!"
                 ipy.embed()
                 sys.exit(1)
 
     def test_bending_cost(self, other, bend_coeff=DEFAULT_LAMBDA[1], outlierprior=1e-1, outlierfrac=1e-2, 
-                       outliercutoff=1e-2,  T = 5e-3, norm_iters = 10):
+                       outliercutoff=1e-2,  T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         self.get_target_points(other, outlierprior, outlierfrac, outliercutoff,  T, norm_iters)
         self.update_transform(bend_coeff)
         bending_costs = self.bending_cost(bend_coeff)
@@ -390,8 +392,7 @@ class GPUContext(object):
                 ## high err tolerance is b/c of difference in cpu and gpu precision?
                 print "cpu and gpu bend costs differ!!!"
                 ipy.embed()
-                sys.exit(1)
-        
+                sys.exit(1)    
 
     def test_init_corr(self, other, T = 5e-3, outlierprior=1e-1, outlierfrac=1e-2, outliercutoff=1e-2, ):
         import scipy.spatial.distance as ssd
@@ -401,7 +402,7 @@ class GPUContext(object):
         init_prob_nm(self.pt_ptrs, other.pt_ptrs, 
                      self.pt_w_ptrs, other.pt_w_ptrs, 
                      self.dims_gpu, other.dims_gpu,
-                     self.N, outlierprior, T, 
+                     self.N, outlierprior, outlierfrac, T, 
                      self.corr_cm_ptrs, self.corr_rm_ptrs)
         gpu_corr_rm = self.corr_rm[0].get()
         gpu_corr_rm = gpu_corr_rm.flatten()[:(self.dims[0] + 1) * (other.dims[0] + 1)].reshape(self.dims[0]+1, other.dims[0]+1)
@@ -423,14 +424,14 @@ class GPUContext(object):
                     ipy.embed()
                     sys.exit(1)
 
-    def test_norm_corr(self, other, T = 5e-3, outlierprior=1e-1, outlierfrac=1e-2, outliercutoff=1e-2, norm_iters = 10):
+    def test_norm_corr(self, other, T = 5e-3, outlierprior=1e-1, outlierfrac=1e-2, outliercutoff=1e-2, norm_iters = DEFAULT_NORM_ITERS):
         import sys
         self.transform_points()
         other.transform_points()
         init_prob_nm(self.pt_ptrs, other.pt_ptrs, 
                      self.pt_w_ptrs, other.pt_w_ptrs, 
                      self.dims_gpu, other.dims_gpu,
-                     self.N, outlierprior, T, 
+                     self.N, outlierprior, outlierfrac, T, 
                      self.corr_cm_ptrs, self.corr_rm_ptrs)
         n, m  = self.dims[0], other.dims[0]
         init_corr = self.corr_rm[0].get()        
@@ -444,6 +445,12 @@ class GPUContext(object):
         old_r_coeffs = np.ones(n+1, dtype=np.float32)
         old_c_coeffs = np.ones(m+1, dtype=np.float32)
         for n_iter in range(1, norm_iters):
+            init_prob_nm(self.pt_ptrs, other.pt_ptrs, 
+                         self.pt_w_ptrs, other.pt_w_ptrs, 
+                         self.dims_gpu, other.dims_gpu,
+                         self.N, outlierprior, outlierfrac, T, 
+                         self.corr_cm_ptrs, self.corr_rm_ptrs)
+
             norm_prob_nm(self.corr_cm_ptrs, self.corr_rm_ptrs, 
                          self.dims_gpu, other.dims_gpu, self.N, outlierfrac, n_iter,
                          self.r_coeff_ptrs, self.c_coeff_rn_ptrs, self.c_coeff_cn_ptrs)        
@@ -464,13 +471,13 @@ class GPUContext(object):
             old_r_coeffs = new_r_coeffs
             old_c_coeffs = new_c_coeffs
             
-    def test_get_targ(self, other, T = 5e-3, outlierprior=1e-1, outlierfrac=1e-2, outliercutoff=1e-2, norm_iters = 10):
+    def test_get_targ(self, other, T = 5e-3, outlierprior=1e-1, outlierfrac=1e-2, outliercutoff=1e-2, norm_iters = DEFAULT_NORM_ITERS):
         self.transform_points()
         other.transform_points()
         init_prob_nm(self.pt_ptrs, other.pt_ptrs, 
                      self.pt_w_ptrs, other.pt_w_ptrs, 
                      self.dims_gpu, other.dims_gpu,
-                     self.N, outlierprior, T, 
+                     self.N, outlierprior, outlierfrac, T, 
                      self.corr_cm_ptrs, self.corr_rm_ptrs)
         norm_prob_nm(self.corr_cm_ptrs, self.corr_rm_ptrs, 
                      self.dims_gpu, other.dims_gpu, self.N, outlierfrac, norm_iters,
@@ -535,7 +542,6 @@ class GPUContext(object):
         self.test_bending_cost(other)
         print "TEST SUCCEEDED!"
         
-        
 
 class TgtContext(GPUContext):
     """
@@ -567,13 +573,18 @@ class TgtContext(GPUContext):
         won't allocate any new memory
         """                          
         proj_mats, offset_mats, K = self.get_sol_params(cld)
-        K_gpu = gpu_pad(K, (MAX_CLD_SIZE, MAX_CLD_SIZE))        
-        self.pts         = [gpu_pad(cld, (MAX_CLD_SIZE, DATA_DIM))]
+        K_gpu = gpu_pad(K, (MAX_CLD_SIZE, MAX_CLD_SIZE))
+        cld_gpu = gpu_pad(cld, (MAX_CLD_SIZE, DATA_DIM))
+        self.pts         = [cld_gpu for _ in range(self.N)]
         self.kernels     = [K_gpu for _ in range(self.N)]
-        self.proj_mats   = dict([(b, [gpu_pad(p.get(), (MAX_CLD_SIZE + DATA_DIM + 1, MAX_CLD_SIZE))])
+        proj_mats_gpu    = dict([(b, gpu_pad(p.get(), (MAX_CLD_SIZE + DATA_DIM + 1, MAX_CLD_SIZE)))
                                  for b, p in proj_mats.iteritems()])
-        self.offset_mats = dict([(b, [gpu_pad(p.get(), (MAX_CLD_SIZE + DATA_DIM + 1, DATA_DIM))]) 
+        self.proj_mats   = dict([(b, [p for _ in range(self.N)])
+                                 for b, p in proj_mats_gpu.iteritems()])
+        offset_mats_gpu  = dict([(b, gpu_pad(p.get(), (MAX_CLD_SIZE + DATA_DIM + 1, DATA_DIM))) 
                                  for b, p in offset_mats.iteritems()])
+        self.offset_mats = dict([(b, [p for _ in range(self.N)])
+                                 for b, p in offset_mats_gpu.iteritems()])
         self.dims        = [cld.shape[0]]
 
         self.pt_ptrs.fill(int(self.pts[0].gpudata))
@@ -581,7 +592,7 @@ class TgtContext(GPUContext):
         self.dims_gpu.fill(self.dims[0])
         for b in self.bend_coeffs:
             self.proj_mat_ptrs[b].fill(int(self.proj_mats[b][0].gpudata))
-            self.offset_mat_ptrs[b].fill(int(self.offset_mats[b][0].gpudata))            
+            self.offset_mat_ptrs[b].fill(int(self.offset_mats[b][0].gpudata))
 
 def check_transform_pts(ctx, i = 0):
     import scikits.cuda.linalg as la
@@ -673,24 +684,143 @@ def batch_tps_rpm_bij(src_ctx, tgt_ctx, T_init = 1e-1, T_final = 5e-3,
     """
     ##TODO: add check to ensure that src_ctx and tgt_ctx are formatted properly
     n_iter = len(src_ctx.bend_coeffs)
-    T_vals = loglinspace(T_init, T_final, n_iter
-)
+    T_vals = loglinspace(T_init, T_final, n_iter)
+
     src_ctx.reset_tps_params()
     tgt_ctx.reset_tps_params()
     for i, b in enumerate(src_ctx.bend_coeffs):
         T = T_vals[i]
         for _ in range(em_iter):
             src_ctx.transform_points()
-            # check_transform_pts(src_ctx)
-            # print "warped", src_ctx.pts_w[0].get()[:3]
-            # print "target", tgt_ctx.pts[0].get()[:3]
-            # print "diff", np.linalg.norm(tgt_ctx.pts[0].get() - src_ctx.pts_w[0].get()) 
             tgt_ctx.transform_points()
             src_ctx.get_target_points(tgt_ctx, outlierprior, outlierfrac, outliercutoff, T)
             src_ctx.update_transform(b)
             # check_update(src_ctx, b)
             tgt_ctx.update_transform(b)
     return src_ctx.bidir_tps_cost(tgt_ctx)
+
+def test_batch_tps_rpm_bij(src_ctx, tgt_ctx, T_init = 1e-1, T_final = 5e-3, 
+                           outlierfrac = 1e-2, outlierprior = 1e-1, outliercutoff = .5, em_iter = EM_ITER_CHEAP,
+                           test_ind = 0):
+    from transformations import ThinPlateSpline, set_ThinPlateSpline
+    import tps
+    n_iter = len(src_ctx.bend_coeffs)
+    T_vals = loglinspace(T_init, T_final, n_iter)
+
+    x_nd = src_ctx.pts[test_ind].get()[:src_ctx.dims[test_ind]]
+    y_md = tgt_ctx.pts[0].get()[:tgt_ctx.dims[0]]
+    (n, d) = x_nd.shape
+    (m, _) = y_md.shape
+
+    f = ThinPlateSpline(d)    
+    g = ThinPlateSpline(d)    
+
+    src_ctx.reset_tps_params()
+    tgt_ctx.reset_tps_params()
+    for i, b in enumerate(src_ctx.bend_coeffs):
+        T = T_vals[i]
+        for _ in range(em_iter):
+            src_ctx.transform_points()
+            tgt_ctx.transform_points()
+
+            xwarped_nd = f.transform_points(x_nd)
+            ywarped_md = g.transform_points(y_md)
+            gpu_xw = src_ctx.pts_w[test_ind].get()[:n, :]
+            gpu_yw = tgt_ctx.pts_w[test_ind].get()[:m, :]
+            assert np.allclose(xwarped_nd, gpu_xw, atol=1e-5)
+            assert np.allclose(ywarped_md, gpu_yw, atol=1e-5)
+
+            xwarped_nd = gpu_xw
+            ywarped_md = gpu_yw
+
+            src_ctx.get_target_points(tgt_ctx, outlierprior, outlierfrac, outliercutoff, T)
+            
+            fwddist_nm = ssd.cdist(xwarped_nd, y_md,'euclidean')
+            invdist_nm = ssd.cdist(x_nd, ywarped_md,'euclidean')
+            prob_nm = outlierprior * np.ones((n+1, m+1), np.float32)
+            prob_nm[:n, :m] = np.exp( -(fwddist_nm + invdist_nm) / float(2*T))
+            prob_nm[n, m] = outlierfrac * np.sqrt(n * m)
+
+            gpu_corr = src_ctx.corr_rm[test_ind].get()
+            gpu_corr = gpu_corr.flatten()
+            gpu_corr = gpu_corr[:(n + 1) * (m + 1)].reshape(n+1, m+1).astype(np.float32)
+
+            assert np.allclose(prob_nm[:n, :m], gpu_corr[:n, :m], atol=1e-5)
+            prob_nm[:n, :m] = gpu_corr[:n, :m]
+
+            r_coeffs = np.ones(n+1, np.float32)
+            c_coeffs = np.ones(m+1, np.float32)
+            a_N = np.ones((n+1),dtype = np.float32)
+            a_N[n] = m*outlierfrac
+            b_M = np.ones((m+1), dtype = np.float32)
+            b_M[m] = n*outlierfrac
+            for _ in range(DEFAULT_NORM_ITERS):
+                r_coeffs = a_N/prob_nm.dot(c_coeffs)
+                rn_c_coeffs = c_coeffs
+                c_coeffs = b_M/r_coeffs.dot(prob_nm)
+            gpu_r_coeffs = src_ctx.r_coeffs[test_ind].get()[:n+1].reshape(n+1)
+            gpu_c_coeffs_cn = src_ctx.c_coeffs_cn[test_ind].get()[:m+1].reshape(m+1)
+            gpu_c_coeffs_rn = src_ctx.c_coeffs_rn[test_ind].get()[:m+1].reshape(m+1)
+            assert np.allclose(r_coeffs, gpu_r_coeffs, atol=1e-5)
+            assert np.allclose(c_coeffs, gpu_c_coeffs_cn, atol=1e-5)
+            assert np.allclose(rn_c_coeffs, gpu_c_coeffs_rn, atol=1e-5)
+            
+            prob_nm = prob_nm[:n, :m]
+            prob_nm *= gpu_r_coeffs[:n, None]
+            rn_p_nm = prob_nm * gpu_c_coeffs_rn[None, :m]
+            cn_p_nm = prob_nm * gpu_c_coeffs_cn[None, :m]
+
+            wt_n = rn_p_nm.sum(axis=1)
+            gpu_corr_cm = src_ctx.corr_cm[test_ind].get().flatten()[:(n+1)*(m+1)]
+            gpu_corr_cm = gpu_corr_cm.reshape(m+1, n+1)## b/c it is column major
+            assert np.allclose(wt_n, gpu_corr_cm[m, :n], atol=1e-4)
+
+            
+            inlier = wt_n > outliercutoff
+            xtarg_nd = np.empty((n, DATA_DIM), np.float32)
+            xtarg_nd[inlier, :] = rn_p_nm.dot(y_md)[inlier, :]
+            xtarg_nd[~inlier, :] = xwarped_nd[~inlier, :]
+
+            wt_m = cn_p_nm.sum(axis=0)
+            assert np.allclose(wt_m, gpu_corr[n, :m], atol=1e-4)
+
+            inlier = wt_m > outliercutoff
+            ytarg_md = np.empty((m, DATA_DIM), np.float32)
+            ytarg_md[inlier, :] = cn_p_nm.T.dot(x_nd)[inlier, :]
+            ytarg_md[~inlier, :] = ywarped_md[~inlier, :]
+            
+            xt_gpu = src_ctx.pts_t[test_ind].get()[:n, :]
+            yt_gpu = tgt_ctx.pts_t[test_ind].get()[:m, :]
+            assert np.allclose(xtarg_nd, xt_gpu, atol=1e-4)
+            assert np.allclose(ytarg_md, yt_gpu, atol=1e-4)
+
+            src_ctx.update_transform(b)
+            tgt_ctx.update_transform(b)
+
+            f_p_mat = src_ctx.proj_mats[b][test_ind].get()[:n+d+1, :n]
+            f_o_mat = src_ctx.offset_mats[b][test_ind].get()[:n+d+1]
+            b_p_mat = tgt_ctx.proj_mats[b][0].get()[:m+d+1, :m]
+            b_o_mat = tgt_ctx.offset_mats[b][0].get()[:m+d+1]
+            f_params = f_p_mat.dot(xtarg_nd) + f_o_mat
+            g_params = b_p_mat.dot(ytarg_md) + b_o_mat
+
+
+            gpu_fparams = src_ctx.tps_params[test_ind].get()[:n+d+1]
+            gpu_gparams = tgt_ctx.tps_params[test_ind].get()[:m+d+1]
+            assert np.allclose(f_params, gpu_fparams, atol=1e-4)
+            assert np.allclose(g_params, gpu_gparams, atol=1e-4)
+
+
+            set_ThinPlateSpline(f, x_nd, gpu_fparams)
+            set_ThinPlateSpline(g, y_md, gpu_gparams)
+
+    f._cost = tps.tps_cost(f.lin_ag, f.trans_g, f.w_ng, f.x_na, xtarg_nd, 1)
+    g._cost = tps.tps_cost(g.lin_ag, g.trans_g, g.w_ng, g.x_na, ytarg_md, 1)
+
+    gpu_cost = src_ctx.bidir_tps_cost(tgt_ctx)    
+    cpu_cost = f._cost + g._cost
+    assert np.isclose(gpu_cost[test_ind], cpu_cost, atol=1e-4)
+    
         
 
 def parse_arguments():
@@ -700,6 +830,7 @@ def parse_arguments():
     parser.add_argument("--sync", action='store_true')
     parser.add_argument("--n_copies", type=int, default=1)
     parser.add_argument("--test", action='store_true')
+    parser.add_argument("--test_full", action='store_true')
     return parser.parse_args()
 
 if __name__=='__main__':
@@ -715,15 +846,27 @@ if __name__=='__main__':
     scaled_tgt_cld, _ = unit_boxify(tgt_cld)
     tgt_ctx = TgtContext(src_ctx)
     tgt_ctx.set_cld(scaled_tgt_cld)
+    if args.test_full:
+        src_ctx.unit_test(tgt_ctx)
+        print "unit tests passed, doing full check on batch tps rpm"
+        for i in range(src_ctx.N):
+            print "testing {}".format(i)
+            test_batch_tps_rpm_bij(src_ctx, tgt_ctx, test_ind=i)
+        print "tests succeeded!"
+        sys.exit()
     if args.test:
         src_ctx.unit_test(tgt_ctx)
-        sys.exit()
+        print "testing batch tps_rps"
+        test_batch_tps_rpm_bij(src_ctx, tgt_ctx)
+        print "test succeeded!!"
+        sys.exit()    
     times = []
     for i in range(20):
         start = time.time()
         tgt_ctx.set_cld(scaled_tgt_cld)
-        batch_tps_rpm_bij(src_ctx, tgt_ctx)
+        c = batch_tps_rpm_bij(src_ctx, tgt_ctx)
         time_taken = time.time() - start
         times.append(time_taken)
         print "Batch Computation Complete, Time Taken is {}".format(time_taken)
     print "Mean Compute Time is {}".format(np.mean(times))
+    print "costs:", c[:20]

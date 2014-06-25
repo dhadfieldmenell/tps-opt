@@ -35,7 +35,7 @@ void pySqDiffMat(py::object x, py::object y, py::object z, int N, bool overwrite
 
 void pyInitProbNM(py::object x, py::object y, py::object xw, py::object yw, 
 		  py::object xdims, py::object ydims, int N,
-		  float outlier_prior, float r, 
+		  float outlierprior, float outlierfrac, float T, 
 		  py::object corr_cm, py::object corr_rm){
   /*
    * Initilialized correspondence matrix returned in corr
@@ -52,7 +52,7 @@ void pyInitProbNM(py::object x, py::object y, py::object xw, py::object yw,
   float** corr_ptr_rm = getGPUPointer<float*>(corr_rm);
 
   initProbNM(x_ptr, y_ptr, xw_ptr, yw_ptr, N, xdims_ptr, ydims_ptr, 
-	     outlier_prior, r, corr_ptr_cm, corr_ptr_rm);
+	     outlierprior, outlierfrac, T, corr_ptr_cm, corr_ptr_rm);
 }
 
 void pyNormProbNM(py::object corr_cm, py::object corr_rm, py::object xdims,
@@ -123,7 +123,7 @@ BOOST_PYTHON_MODULE(cuda_funcs) {
 
   py::def("init_prob_nm", &pyInitProbNM, (py::arg("x"), py::arg("y"), py::arg("xw"), py::arg("yw"), 
 					  py::arg("xdims"), py::arg("ydims"), py::arg("N"), 
-					  py::arg("outlier_prior"), py::arg("r"), 
+					  py::arg("outlierprior"), py::arg("outlierfrac"), py::arg("T"), 
 					  py::arg("corr_cm"), py::arg("corr_rm")));
 
   py::def("norm_prob_nm", &pyNormProbNM, (py::arg("corr_cm"), py::arg("corr_rm"),

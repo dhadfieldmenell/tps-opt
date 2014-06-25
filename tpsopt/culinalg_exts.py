@@ -60,7 +60,7 @@ def dot_batch(a_arr_gpu, b_arr_gpu, a_ptr_gpu, b_ptr_gpu,
     return c_arr_gpu, c_ptr_gpu
 
 def dot_batch_nocheck(a_arr_gpu, b_arr_gpu, c_arr_gpu, a_ptr_gpu, b_ptr_gpu, c_ptr_gpu,
-                      transa = 'N', transb = 'N', a = 1, b = 1, handle = None, check_c = True):
+                      transa = 'N', transb = 'N', a = 1, b = 1, handle = None):
     """
     Implementation of batched dot products using cuda.    
 
@@ -180,9 +180,9 @@ def dot_batch_nocheck(a_arr_gpu, b_arr_gpu, c_arr_gpu, a_ptr_gpu, b_ptr_gpu, c_p
     
     if l != k:
         raise ValueError('objects are not aligned')    
-    if check_c and i != n:
+    if i != n:
         raise ValueError('objects are not aligned')
-    if check_c and j != m:
+    if j != m:
         raise ValueError('objects are not aligned')
     
     if transb == 'n':

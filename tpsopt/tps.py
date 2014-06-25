@@ -206,7 +206,7 @@ def solve_eqp1(H, f, A):
     min tr(x'Hx) + sum(f'x)
     s.t. Ax = 0
     """    
-    print f.shape
+    # print f.shape
     n_vars = H.shape[0]
     assert H.shape[1] == n_vars
     assert f.shape[0] == n_vars

@@ -24,11 +24,12 @@ $ python setup.py install
 The last line may need to run as root.
 
 Check out the tps-opt repo and build the additional cuda functionality
+```
 $ git clone https://github.com/dhadfieldmenell/tps-opt.git
 $ cd tps-opt/tpsopt
 $ cmake .
 $ make
-
+```
 It has been tested with the RLL overhand-knot tying demonstration dataset. Obtain a copy from https://www.dropbox.com/s/wnt3j42jp5solr8/actions.h5. 
 
 To check the build, cd to tps-opt/tpsopt and run the following

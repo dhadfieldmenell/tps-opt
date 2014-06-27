@@ -32,6 +32,7 @@ $ make
 It has been tested with the RLL overhand-knot tying demonstration dataset. Obtain a copy from https://www.dropbox.com/s/wnt3j42jp5solr8/actions.h5. 
 
 To check the build, cd to tps-opt/tpsopt and run the following
+
 dhm@primus:~$ cd src/tps-opt/tpsopt/
 dhm@primus:~/src/tps-opt/tpsopt$ python precompute.py ../data/actions.h5 --replace --verbose
 precomputed tps solver for segment failuretwo_5-seg02

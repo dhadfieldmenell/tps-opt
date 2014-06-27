@@ -245,7 +245,7 @@ class GPUContext(object):
         f.close()
         self.update_ptrs()
 
-    @profile
+    # @profile
     def setup_tgt_ctx(self, cloud_xyz):
         """
         returns a GPUContext where all the clouds are cloud_xyz
@@ -257,7 +257,7 @@ class GPUContext(object):
         tgt_ctx.set_cld(cloud_xyz)
         return tgt_ctx
 
-    @profile
+    # @profile
     def transform_points(self):
         """
         computes the warp of self.pts under the current tps params
@@ -269,7 +269,7 @@ class GPUContext(object):
                           self.kernel_ptrs, self.w_nd_ptrs,   self.pt_w_ptrs) 
         sync()
     
-    @profile
+    # @profile
     def get_target_points(self, other, outlierprior=1e-1, outlierfrac=1e-2, outliercutoff=1e-2, 
                           T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         """
@@ -295,7 +295,7 @@ class GPUContext(object):
                      self.pt_t_ptrs, other.pt_t_ptrs)
         sync()
 
-    @profile
+    # @profile
     def update_transform(self, b):
         """
         computes the TPS associated with the current target pts
@@ -304,7 +304,7 @@ class GPUContext(object):
         dot_batch_nocheck(self.proj_mats[b],     self.pts_t,     self.tps_params,
                           self.proj_mat_ptrs[b], self.pt_t_ptrs, self.tps_param_ptrs)
         sync()
-    @profile
+    # @profile
     def mapping_cost(self, other, bend_coeff=DEFAULT_LAMBDA[1], outlierprior=1e-1, outlierfrac=1e-2, 
                        outliercutoff=1e-2,  T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         """
@@ -318,7 +318,7 @@ class GPUContext(object):
         sq_diffs(other.pt_w_ptrs, other.pt_t_ptrs, self.warp_err, self.N, False)
         warp_err = self.warp_err.get()
         return np.sum(warp_err, axis=1)
-    @profile
+    # @profile
     def bending_cost(self, b=DEFAULT_LAMBDA[1]):
         ## b * w_nd' * K * w_nd
         ## use pts_w as temporary storage
@@ -331,7 +331,7 @@ class GPUContext(object):
                           transa='T', b = 0)
         bend_res = self.bend_res_mat.get()        
         return b * np.array([np.trace(bend_res[i*DATA_DIM:(i+1)*DATA_DIM]) for i in range(self.N)])
-    @profile
+    # @profile
     def bidir_tps_cost(self, other, bend_coeff=1, outlierprior=1e-1, outlierfrac=1e-2, 
                        outliercutoff=1e-2,  T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         self.reset_warp_err()
@@ -556,7 +556,7 @@ class TgtContext(GPUContext):
         raise NotImplementedError("not implemented for TgtConext")
     def update_ptrs(self):
         raise NotImplementedError("not implemented for TgtConext")
-    @profile
+    # @profile
     def set_cld(self, cld):
         """
         sets the cloud for this appropriately

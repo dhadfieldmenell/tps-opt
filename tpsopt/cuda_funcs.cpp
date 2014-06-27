@@ -28,7 +28,7 @@ void pyFillMat(py::object dest, py::object val, py::object dims, int N){
 void pySqDiffMat(py::object x, py::object y, py::object z, int N, bool overwrite){
   float** x_ptr   = getGPUPointer<float*>(x);
   float** y_ptr   = getGPUPointer<float*>(y);
-  float* z_ptr = getGPUPointer<float>(z);
+  float* z_ptr    = getGPUPointer<float>(z);
   
   sqDiffMat(x_ptr, y_ptr, z_ptr, N, overwrite);
 }

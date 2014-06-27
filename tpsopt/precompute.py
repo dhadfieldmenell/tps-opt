@@ -16,6 +16,8 @@ from pycuda import gpuarray
 import scikits.cuda.linalg
 from scikits.cuda.linalg import dot as cu_dot
 from scikits.cuda.linalg import pinv as cu_pinv
+from defaults import N_ITER_CHEAP, DEFAULT_LAMBDA, DS_SIZE, BEND_COEFF_DIGITS
+import sys
 
 import IPython as ipy
 
@@ -26,9 +28,9 @@ def loglinspace(a,b,n):
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('datafile', type=str)
-    parser.add_argument('--bend_coef_init', type=float, default=10)
-    parser.add_argument('--bend_coef_final', type=float, default=.1)
-    parser.add_argument('--n_iter', type=int, default=20)
+    parser.add_argument('--bend_coef_init', type=float, default=DEFAULT_LAMBDA[0])
+    parser.add_argument('--bend_coef_final', type=float, default=DEFAULT_LAMBDA[1])
+    parser.add_argument('--n_iter', type=int, default=N_ITER_CHEAP)
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--replace', action='store_true')
     parser.add_argument('--cloud_name', type=str, default='cloud_xyz')
@@ -143,7 +145,6 @@ def get_sol_params(x_na, K_nn, bend_coef, rot_coef=np.r_[1e-4, 1e-4, 1e-1]):
     return bend_coef, res_dict
 
 
-DS_SIZE = 0.025
 def downsample_cloud(cloud_xyz):
     return clouds.downsample(cloud_xyz, DS_SIZE)
 
@@ -152,7 +153,8 @@ def main():
 
     f = h5py.File(args.datafile, 'r+')
     
-    bend_coefs = np.around(loglinspace(args.bend_coef_init, args.bend_coef_final, args.n_iter), 6)
+    bend_coefs = np.around(loglinspace(args.bend_coef_init, args.bend_coef_final, args.n_iter), 
+                           BEND_COEFF_DIGITS)
 
     for seg_name, seg_info in f.iteritems():
         if 'inv' in seg_info:
@@ -188,7 +190,9 @@ def main():
                 bend_coef_g[k] = v
 
         if args.verbose:
-            print 'segment {}  bend_coef {}'.format(seg_name, bend_coef)
+            sys.stdout.write('\rprecomputed tps solver for segment {}'.format(seg_name))
+            sys.stdout.flush()
+    print ""
 
     f.close()
 

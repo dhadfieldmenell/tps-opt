@@ -17,19 +17,12 @@ from culinalg_exts import dot_batch_nocheck, get_gpu_ptrs, m_dot_batch, extract_
 from precompute import downsample_cloud, batch_get_sol_params
 from cuda_funcs import init_prob_nm, norm_prob_nm, get_targ_pts, check_cuda_err, fill_mat, reset_cuda, sq_diffs
 from registration import registration_cost as cpu_registration_cost
+from defaults import N_ITER_CHEAP, EM_ITER_CHEAP, DEFAULT_LAMBDA, MAX_CLD_SIZE, DATA_DIM, DS_SIZE, N_STREAMS, DEFAULT_NORM_ITERS, BEND_COEFF_DIGITS
 
 import IPython as ipy
 from pdb import pm, set_trace
 import time
 
-N_ITER_CHEAP = 10
-EM_ITER_CHEAP = 1
-DEFAULT_LAMBDA = (.1, .001)
-MAX_CLD_SIZE = 150
-DATA_DIM = 3
-DS_SIZE = 0.025
-N_STREAMS = 10
-DEFAULT_NORM_ITERS = 10
 
 class Globals:
     sync = False
@@ -63,7 +56,8 @@ class GPUContext(object):
     def __init__(self, bend_coeffs = None):
         if bend_coeffs is None:
             lambda_init, lambda_final = DEFAULT_LAMBDA
-            bend_coeffs = np.around(loglinspace(lambda_init, lambda_final, N_ITER_CHEAP), 6)
+            bend_coeffs = np.around(loglinspace(lambda_init, lambda_final, N_ITER_CHEAP), 
+                                    BEND_COEFF_DIGITS)
         self.bend_coeffs = bend_coeffs
         self.ptrs_valid = False
         self.N = 0
@@ -251,7 +245,7 @@ class GPUContext(object):
         f.close()
         self.update_ptrs()
 
-    # @profile
+    @profile
     def setup_tgt_ctx(self, cloud_xyz):
         """
         returns a GPUContext where all the clouds are cloud_xyz
@@ -263,7 +257,7 @@ class GPUContext(object):
         tgt_ctx.set_cld(cloud_xyz)
         return tgt_ctx
 
-    # @profile
+    @profile
     def transform_points(self):
         """
         computes the warp of self.pts under the current tps params
@@ -275,7 +269,7 @@ class GPUContext(object):
                           self.kernel_ptrs, self.w_nd_ptrs,   self.pt_w_ptrs) 
         sync()
     
-    # @profile
+    @profile
     def get_target_points(self, other, outlierprior=1e-1, outlierfrac=1e-2, outliercutoff=1e-2, 
                           T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         """
@@ -301,7 +295,7 @@ class GPUContext(object):
                      self.pt_t_ptrs, other.pt_t_ptrs)
         sync()
 
-    # @profile
+    @profile
     def update_transform(self, b):
         """
         computes the TPS associated with the current target pts
@@ -310,7 +304,7 @@ class GPUContext(object):
         dot_batch_nocheck(self.proj_mats[b],     self.pts_t,     self.tps_params,
                           self.proj_mat_ptrs[b], self.pt_t_ptrs, self.tps_param_ptrs)
         sync()
-    # @profile
+    @profile
     def mapping_cost(self, other, bend_coeff=DEFAULT_LAMBDA[1], outlierprior=1e-1, outlierfrac=1e-2, 
                        outliercutoff=1e-2,  T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         """
@@ -324,7 +318,7 @@ class GPUContext(object):
         sq_diffs(other.pt_w_ptrs, other.pt_t_ptrs, self.warp_err, self.N, False)
         warp_err = self.warp_err.get()
         return np.sum(warp_err, axis=1)
-    # @profile
+    @profile
     def bending_cost(self, b=DEFAULT_LAMBDA[1]):
         ## b * w_nd' * K * w_nd
         ## use pts_w as temporary storage
@@ -337,7 +331,7 @@ class GPUContext(object):
                           transa='T', b = 0)
         bend_res = self.bend_res_mat.get()        
         return b * np.array([np.trace(bend_res[i*DATA_DIM:(i+1)*DATA_DIM]) for i in range(self.N)])
-    # @profile
+    @profile
     def bidir_tps_cost(self, other, bend_coeff=1, outlierprior=1e-1, outlierfrac=1e-2, 
                        outliercutoff=1e-2,  T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         self.reset_warp_err()
@@ -530,17 +524,13 @@ class GPUContext(object):
             sys.exit(1)                            
 
     def unit_test(self, other):
-        print "testing initialization"
+        print "running basic unit tests"
         self.test_init_corr(other)
-        print "testing normalization"
         self.test_norm_corr(other)
-        print "testing target generation"
         self.test_get_targ(other)
-        print "testing mapping cost"
         self.test_mapping_cost(other)
-        print "testing bending cost"
         self.test_bending_cost(other)
-        print "TEST SUCCEEDED!"
+        print "UNIT TESTS PASSED"
         
 
 class TgtContext(GPUContext):
@@ -566,7 +556,7 @@ class TgtContext(GPUContext):
         raise NotImplementedError("not implemented for TgtConext")
     def update_ptrs(self):
         raise NotImplementedError("not implemented for TgtConext")
-    # @profile
+    @profile
     def set_cld(self, cld):
         """
         sets the cloud for this appropriately
@@ -675,7 +665,7 @@ def check_update(ctx, b):
         ipy.embed()
         sys.exit(1)
 
-# @profile
+@profile
 def batch_tps_rpm_bij(src_ctx, tgt_ctx, T_init = 1e-1, T_final = 5e-3, 
                       outlierfrac = 1e-2, outlierprior = 1e-1, outliercutoff = 1e-2, em_iter = EM_ITER_CHEAP):
     """
@@ -831,6 +821,7 @@ def parse_arguments():
     parser.add_argument("--n_copies", type=int, default=1)
     parser.add_argument("--test", action='store_true')
     parser.add_argument("--test_full", action='store_true')
+    parser.add_argument("--timing_runs", type=int, default=100)
     return parser.parse_args()
 
 if __name__=='__main__':
@@ -850,8 +841,10 @@ if __name__=='__main__':
         src_ctx.unit_test(tgt_ctx)
         print "unit tests passed, doing full check on batch tps rpm"
         for i in range(src_ctx.N):
-            print "testing {}".format(i)
+            sys.stdout.write("\rtesting source cloud {}".format(i))
+            sys.stdout.flush()
             test_batch_tps_rpm_bij(src_ctx, tgt_ctx, test_ind=i)
+        print""
         print "tests succeeded!"
         sys.exit()
     if args.test:
@@ -861,12 +854,16 @@ if __name__=='__main__':
         print "test succeeded!!"
         sys.exit()    
     times = []
-    for i in range(20):
+    print "batchtps initialized"
+    for i in range(args.timing_runs):
+        sys.stdout.write("\rRunning Timing test {}/{}".format(i, args.timing_runs))
+        sys.stdout.flush()
         start = time.time()
         tgt_ctx.set_cld(scaled_tgt_cld)
         c = batch_tps_rpm_bij(src_ctx, tgt_ctx)
         time_taken = time.time() - start
         times.append(time_taken)
-        print "Batch Computation Complete, Time Taken is {}".format(time_taken)
-    print "Mean Compute Time is {}".format(np.mean(times))
-    print "costs:", c[:20]
+    print "\nTiming Tests Complete"
+    print "Batch Size:\t\t\t", src_ctx.N
+    print "Mean Compute Time per Batch:\t", np.mean(times)
+    print "BiDirectional TPS fits/second:\t", float(args.timing_runs * src_ctx.N) / np.sum(times)

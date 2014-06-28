@@ -16,11 +16,11 @@ http://www.r-tutor.com/gpu-computing/cuda-installation/cuda6.0-ubuntu
 http://docs.nvidia.com/cuda/cuda-getting-started-guide-for-linux/index.html
 
 Install latest scikits.cuda from source (version available through pip doesn't have integration for the batched cublas calls yet).
-
+```
 $ git clone https://github.com/lebedov/scikits.cuda.git
 $ cd scikits.cuda
 $ python setup.py install 
-
+```
 The last line may need to run as root.
 
 Check out the tps-opt repo and build the additional cuda functionality

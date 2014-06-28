@@ -665,7 +665,7 @@ def check_update(ctx, b):
         ipy.embed()
         sys.exit(1)
 
-@profile
+# @profile
 def batch_tps_rpm_bij(src_ctx, tgt_ctx, T_init = 1e-1, T_final = 5e-3, 
                       outlierfrac = 1e-2, outlierprior = 1e-1, outliercutoff = 1e-2, em_iter = EM_ITER_CHEAP):
     """

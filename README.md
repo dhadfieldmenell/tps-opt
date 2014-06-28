@@ -32,18 +32,18 @@ $ make
 ```
 It has been tested with the RLL overhand-knot tying demonstration dataset. Obtain a copy from https://www.dropbox.com/s/wnt3j42jp5solr8/actions.h5. 
 
-To check the build, cd to tps-opt/tpsopt and run the following
+To check the build, cd to tps-opt/tpsopt and run the appropriate version of the following
 ```
 dhm@primus:~$ cd src/tps-opt/tpsopt/
-dhm@primus:~/src/tps-opt/tpsopt$ python precompute.py ../data/actions.h5 --replace --verbose
+dhm@primus:~/src/tps-opt/tpsopt$ python precompute.py path/to/actions.h5 --replace --verbose
 precomputed tps solver for segment failuretwo_5-seg02
-dhm@primus:~/src/tps-opt/tpsopt$ python batchtps.py --input_file ../data/actions.h5 --test_full
+dhm@primus:~/src/tps-opt/tpsopt$ python batchtps.py --input_file path/to/actions.h5 --test_full
 running basic unit tests
 UNIT TESTS PASSED
 unit tests passed, doing full check on batch tps rpm
 testing source cloud 147
 tests succeeded!
-dhm@primus:~/src/tps-opt/tpsopt$ python batchtps.py --input_file ../data/actions.h5
+dhm@primus:~/src/tps-opt/tpsopt$ python batchtps.py --input_file path/to/actions.h5
 batchtps initialized
 Running Timing test 99/100
 Timing Tests Complete

@@ -21,6 +21,7 @@ from transformations import ThinPlateSpline, fit_ThinPlateSpline, set_ThinPlateS
 import tps
 from tps import tps_cost
 import IPython as ipy
+from defaults import BEND_COEF_DIGITS
 # from svds import svds
 
 
@@ -210,24 +211,29 @@ def tps_rpm_bij(x_nd, y_md, n_iter = 20, reg_init = .1, reg_final = .001, rad_in
     if return_corr:
         return f, g, corr_nm
     return f,g
-def tps_rpm_bij_presolve(x_nd, y_md, n_iter = 20, reg_init = .1, reg_final = .001, rad_init = .1, rad_final = .005, 
-                         rot_reg = 1e-3, f_p_mats = None, f_o_mats = None, b_p_mats = None, b_o_mats = None):
+# @profile
+def tps_rpm_bij_presolve(x_nd, y_md, fsolve, gsolve,n_iter = 20, reg_init = .1, 
+                         reg_final = .001, rad_init = .1, rad_final = .005, 
+                         rot_reg = 1e-3, outlierprior=1e-1, outlierfrac=2e-1, vis_cost_xy=None, return_corr=False, check_solver=False):
     """
     tps-rpm algorithm mostly as described by chui and rangaran
     reg_init/reg_final: regularization on curvature
     rad_init/rad_final: radius for correspondence calculation (meters)
+    plotting: 0 means don't plot. integer n means plot every n iterations
     """
-    assert f_p_mats != None
-    assert f_o_mats != None
-    assert b_p_mats != None
-    assert b_o_mats != None
+    
     _,d=x_nd.shape
-    regs = np.around(loglinspace(reg_init, reg_final, n_iter), 6)
+    regs = np.around(loglinspace(reg_init, reg_final, n_iter), BEND_COEF_DIGITS)
     rads = loglinspace(rad_init, rad_final, n_iter)
-    f = ThinPlateSpline(d)    
+
+    f = ThinPlateSpline(d)
     f.trans_g = np.median(y_md,axis=0) - np.median(x_nd,axis=0)
+
     g = ThinPlateSpline(d)
     g.trans_g = -f.trans_g
+
+
+    # r_N = None
     
     for i in xrange(n_iter):
         xwarped_nd = f.transform_points(x_nd)
@@ -238,29 +244,32 @@ def tps_rpm_bij_presolve(x_nd, y_md, n_iter = 20, reg_init = .1, reg_final = .00
         
         r = rads[i]
         prob_nm = np.exp( -(fwddist_nm + invdist_nm) / (2*r) )
-        corr_nm, r_N, _ =  balance_matrix3(prob_nm, 10, 1e-1, 1e-2)
+        corr_nm, r_N, _ =  balance_matrix3(prob_nm, 10, outlierprior, outlierfrac)
         corr_nm += 1e-9
         
         wt_n = corr_nm.sum(axis=1)
         wt_m = corr_nm.sum(axis=0)
 
-        inlier = wt_n > 1e-2
-        xtarg_nd = np.empty(x_nd.shape)
-        xtarg_nd[inlier, :] = (corr_nm/wt_n[:,None]).dot(y_md)[inlier, :]
-        xtarg_nd[~inlier, :] = xwarped_nd[~inlier, :] 
+        xtarg_nd = (corr_nm/wt_n[:,None]).dot(y_md)
+        ytarg_md = (corr_nm/wt_m[None,:]).T.dot(x_nd)                
 
-        inlier = wt_m > 1e-2
-        ytarg_md = np.empty(y_md.shape)
-        ytarg_md[inlier, :] = x_nd.dot(corr_nm/wt_m[:,None])[inlier, :]
-        ytarg_md[~inlier, :] = ywarped_md[~inlier, :] 
-        
-        f_params = f_p_mats[regs[i]].dot(xtarg_nd) + f_o_mats[regs[i]]
-        set_ThinPlateSpline(f, x_nd, f_params)
-        g_params = b_p_mats[regs[i]].dot(ytarg_md) + b_o_mats[regs[i]]
-        set_ThinPlateSpline(g, y_md, g_params)
+        fsolve.solve(wt_n, xtarg_nd, regs[i], rot_reg, f)        
+        gsolve.solve(wt_m, ytarg_md, regs[i], rot_reg, g)
+        if check_solver:
+            f_test = fit_ThinPlateSpline(x_nd, xtarg_nd, bend_coef = regs[i], wt_n=wt_n, rot_coef = rot_reg)
+            g_test = fit_ThinPlateSpline(y_md, ytarg_md, bend_coef = regs[i], wt_n=wt_m, rot_coef = rot_reg)
+            tol = 1e-4
+            assert np.allclose(f.trans_g, f_test.trans_g, atol=tol)
+            assert np.allclose(f.lin_ag, f_test.lin_ag, atol=tol)
+            assert np.allclose(f.w_ng, f_test.w_ng, atol=tol)
+            assert np.allclose(g.trans_g, g_test.trans_g, atol=tol)
+            assert np.allclose(g.lin_ag, g_test.lin_ag, atol=tol)
+            assert np.allclose(g.w_ng, g_test.w_ng, atol=tol)
 
-    f._cost = tps.tps_cost(f.lin_ag, f.trans_g, f.w_ng, f.x_na, xtarg_nd, regs[i])
-    g._cost = tps.tps_cost(g.lin_ag, g.trans_g, g.w_ng, g.x_na, ytarg_md, regs[i])
+    f._cost = tps.tps_cost(f.lin_ag, f.trans_g, f.w_ng, f.x_na, xtarg_nd, regs[i], wt_n=wt_n)/wt_n.mean()
+    g._cost = tps.tps_cost(g.lin_ag, g.trans_g, g.w_ng, g.x_na, ytarg_md, regs[i], wt_n=wt_m)/wt_m.mean()
+    if return_corr:
+        return (f, g), corr_nm
     return f,g
 
 def tps_reg_cost(f):

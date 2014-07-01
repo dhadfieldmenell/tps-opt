@@ -13,11 +13,13 @@ linalg.init()
 
 from tps import tps_kernel_matrix, tps_eval
 from transformations import unit_boxify
-from culinalg_exts import dot_batch_nocheck, get_gpu_ptrs, m_dot_batch, extract_cols, batch_sum
+from culinalg_exts import dot_batch_nocheck, get_gpu_ptrs, m_dot_batch
 from precompute import downsample_cloud, batch_get_sol_params
-from cuda_funcs import init_prob_nm, norm_prob_nm, get_targ_pts, check_cuda_err, fill_mat, reset_cuda, sq_diffs
+from cuda_funcs import init_prob_nm, norm_prob_nm, get_targ_pts, check_cuda_err, \
+    fill_mat, reset_cuda, sq_diffs
 from registration import registration_cost as cpu_registration_cost
-from defaults import N_ITER_CHEAP, EM_ITER_CHEAP, DEFAULT_LAMBDA, MAX_CLD_SIZE, DATA_DIM, DS_SIZE, N_STREAMS, DEFAULT_NORM_ITERS, BEND_COEFF_DIGITS
+from defaults import N_ITER_CHEAP, EM_ITER_CHEAP, DEFAULT_LAMBDA, MAX_CLD_SIZE, \
+    DATA_DIM, DS_SIZE, N_STREAMS, DEFAULT_NORM_ITERS, BEND_COEF_DIGITS
 
 import IPython as ipy
 from pdb import pm, set_trace
@@ -53,12 +55,12 @@ class GPUContext(object):
     """
     Class to contain GPU arrays
     """
-    def __init__(self, bend_coeffs = None):
-        if bend_coeffs is None:
+    def __init__(self, bend_coefs = None):
+        if bend_coefs is None:
             lambda_init, lambda_final = DEFAULT_LAMBDA
-            bend_coeffs = np.around(loglinspace(lambda_init, lambda_final, N_ITER_CHEAP), 
-                                    BEND_COEFF_DIGITS)
-        self.bend_coeffs = bend_coeffs
+            bend_coefs = np.around(loglinspace(lambda_init, lambda_final, N_ITER_CHEAP), 
+                                    BEND_COEF_DIGITS)
+        self.bend_coefs = bend_coefs
         self.ptrs_valid = False
         self.N = 0
 
@@ -82,10 +84,10 @@ class GPUContext(object):
         self.default_tps_params = gpuarray.zeros((DATA_DIM + 1 + MAX_CLD_SIZE, DATA_DIM), np.float32)
         self.default_tps_params[1:DATA_DIM+1, :].set(np.eye(DATA_DIM, dtype=np.float32))
 
-        self.proj_mats       = dict([(b, []) for b in bend_coeffs])
-        self.proj_mat_ptrs   = dict([(b, None) for b in bend_coeffs])
-        self.offset_mats     = dict([(b, []) for b in bend_coeffs])
-        self.offset_mat_ptrs = dict([(b, None) for b in bend_coeffs])
+        self.proj_mats       = dict([(b, []) for b in bend_coefs])
+        self.proj_mat_ptrs   = dict([(b, None) for b in bend_coefs])
+        self.offset_mats     = dict([(b, []) for b in bend_coefs])
+        self.offset_mat_ptrs = dict([(b, None) for b in bend_coefs])
 
         self.pts             = []
         self.pt_ptrs         = None
@@ -108,12 +110,12 @@ class GPUContext(object):
         self.corr_cm_ptrs     = None
         self.corr_rm          = []
         self.corr_rm_ptrs     = None
-        self.r_coeffs         = []
-        self.r_coeff_ptrs     = None
-        self.c_coeffs_rn      = []
-        self.c_coeff_rn_ptrs  = None
-        self.c_coeffs_cn      = []
-        self.c_coeff_cn_ptrs  = None
+        self.r_coefs         = []
+        self.r_coef_ptrs     = None
+        self.c_coefs_rn      = []
+        self.c_coef_rn_ptrs  = None
+        self.c_coefs_cn      = []
+        self.c_coef_cn_ptrs  = None
         self.seg_names        = []
 
     def reset_tps_params(self):
@@ -142,8 +144,8 @@ class GPUContext(object):
         K = tps_kernel_matrix(cld)
         proj_mats   = {}
         offset_mats = {}
-        (proj_mats_arr, _), (offset_mats_arr, _) = batch_get_sol_params(cld, K, self.bend_coeffs)
-        for i, b in enumerate(self.bend_coeffs):
+        (proj_mats_arr, _), (offset_mats_arr, _) = batch_get_sol_params(cld, K, self.bend_coefs)
+        for i, b in enumerate(self.bend_coefs):
             proj_mats[b]   = proj_mats_arr[i]
             offset_mats[b] = offset_mats_arr[i]
         return proj_mats, offset_mats, K
@@ -162,7 +164,7 @@ class GPUContext(object):
         self.w_nd.append(self.tps_params[-1][DATA_DIM + 1:, :])
         n = cloud_xyz.shape[0]
         
-        for b in self.bend_coeffs:
+        for b in self.bend_coefs:
             proj_mat   = proj_mats[b]
             offset_mat = offset_mats[b]
             self.proj_mats[b].append(gpu_pad(proj_mat, (MAX_CLD_SIZE + DATA_DIM + 1, MAX_CLD_SIZE)))
@@ -185,9 +187,9 @@ class GPUContext(object):
         self.pts_t.append(gpuarray.zeros_like(self.pts[-1]))
         self.corr_cm.append(gpuarray.zeros((MAX_CLD_SIZE, MAX_CLD_SIZE), np.float32))
         self.corr_rm.append(gpuarray.zeros((MAX_CLD_SIZE, MAX_CLD_SIZE), np.float32))
-        self.r_coeffs.append(gpuarray.zeros((MAX_CLD_SIZE, 1), np.float32))
-        self.c_coeffs_rn.append(gpuarray.zeros((MAX_CLD_SIZE, 1), np.float32))
-        self.c_coeffs_cn.append(gpuarray.zeros((MAX_CLD_SIZE, 1), np.float32))
+        self.r_coefs.append(gpuarray.zeros((MAX_CLD_SIZE, 1), np.float32))
+        self.c_coefs_rn.append(gpuarray.zeros((MAX_CLD_SIZE, 1), np.float32))
+        self.c_coefs_cn.append(gpuarray.zeros((MAX_CLD_SIZE, 1), np.float32))
 
         if update_ptrs:
             self.update_ptrs()
@@ -198,7 +200,7 @@ class GPUContext(object):
         self.lin_dd_ptrs    = get_gpu_ptrs(self.lin_dd)
         self.w_nd_ptrs      = get_gpu_ptrs(self.w_nd)
         
-        for b in self.bend_coeffs:
+        for b in self.bend_coefs:
             self.proj_mat_ptrs[b]   = get_gpu_ptrs(self.proj_mats[b])
             self.offset_mat_ptrs[b] = get_gpu_ptrs(self.offset_mats[b])
 
@@ -210,9 +212,9 @@ class GPUContext(object):
         self.pt_t_ptrs       = get_gpu_ptrs(self.pts_t)
         self.corr_cm_ptrs    = get_gpu_ptrs(self.corr_cm)
         self.corr_rm_ptrs    = get_gpu_ptrs(self.corr_rm)
-        self.r_coeff_ptrs    = get_gpu_ptrs(self.r_coeffs)
-        self.c_coeff_rn_ptrs = get_gpu_ptrs(self.c_coeffs_rn)
-        self.c_coeff_cn_ptrs = get_gpu_ptrs(self.c_coeffs_cn)
+        self.r_coef_ptrs    = get_gpu_ptrs(self.r_coefs)
+        self.c_coef_rn_ptrs = get_gpu_ptrs(self.c_coefs_rn)
+        self.c_coef_cn_ptrs = get_gpu_ptrs(self.c_coefs_cn)
         ## temporary space used for bend/warp cost computations
         self.warp_err        = gpuarray.zeros((self.N, MAX_CLD_SIZE), np.float32)
         self.bend_res_mat    = gpuarray.zeros((DATA_DIM * self.N, DATA_DIM), np.float32)
@@ -231,10 +233,10 @@ class GPUContext(object):
 
             proj_mats   = {}
             offset_mats = {}
-            for b in self.bend_coeffs:
+            for b in self.bend_coefs:
                 k = str(b)
                 if k not in seg_info:
-                    raise KeyError("H5 File {} bend coefficient {}".format(seg_name, k))
+                    raise KeyError("H5 File {} bend coeficient {}".format(seg_name, k))
                 proj_mats[b] = seg_info[k]['proj_mat'][:]
                 offset_mats[b] = seg_info[k]['offset_mat'][:]
 
@@ -284,12 +286,12 @@ class GPUContext(object):
         sync()
         norm_prob_nm(self.corr_cm_ptrs, self.corr_rm_ptrs, 
                      self.dims_gpu, other.dims_gpu, self.N, outlierfrac, norm_iters,
-                     self.r_coeff_ptrs, self.c_coeff_rn_ptrs, self.c_coeff_cn_ptrs)        
+                     self.r_coef_ptrs, self.c_coef_rn_ptrs, self.c_coef_cn_ptrs)        
         sync()
         get_targ_pts(self.pt_ptrs, other.pt_ptrs,
                      self.pt_w_ptrs, other.pt_w_ptrs,
                      self.corr_cm_ptrs, self.corr_rm_ptrs,
-                     self.r_coeff_ptrs, self.c_coeff_rn_ptrs, self.c_coeff_cn_ptrs,
+                     self.r_coef_ptrs, self.c_coef_rn_ptrs, self.c_coef_cn_ptrs,
                      self.dims_gpu, other.dims_gpu, 
                      outliercutoff, self.N,
                      self.pt_t_ptrs, other.pt_t_ptrs)
@@ -305,7 +307,7 @@ class GPUContext(object):
                           self.proj_mat_ptrs[b], self.pt_t_ptrs, self.tps_param_ptrs)
         sync()
     # @profile
-    def mapping_cost(self, other, bend_coeff=DEFAULT_LAMBDA[1], outlierprior=1e-1, outlierfrac=1e-2, 
+    def mapping_cost(self, other, bend_coef=DEFAULT_LAMBDA[1], outlierprior=1e-1, outlierfrac=1e-2, 
                        outliercutoff=1e-2,  T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         """
         computes the error in the current mapping
@@ -332,19 +334,19 @@ class GPUContext(object):
         bend_res = self.bend_res_mat.get()        
         return b * np.array([np.trace(bend_res[i*DATA_DIM:(i+1)*DATA_DIM]) for i in range(self.N)])
     # @profile
-    def bidir_tps_cost(self, other, bend_coeff=1, outlierprior=1e-1, outlierfrac=1e-2, 
+    def bidir_tps_cost(self, other, bend_coef=1, outlierprior=1e-1, outlierfrac=1e-2, 
                        outliercutoff=1e-2,  T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         self.reset_warp_err()
         mapping_err  = self.mapping_cost(other, outlierprior, outlierfrac, outliercutoff, T, norm_iters)
-        bending_cost = self.bending_cost(bend_coeff)
-        bending_cost += other.bending_cost(bend_coeff)
+        bending_cost = self.bending_cost(bend_coef)
+        bending_cost += other.bending_cost(bend_coef)
         return mapping_err + bending_cost
 
     """
     testing for custom kernels
     """
 
-    def test_mapping_cost(self, other, bend_coeff=DEFAULT_LAMBDA[1], outlierprior=1e-1, outlierfrac=1e-2, 
+    def test_mapping_cost(self, other, bend_coef=DEFAULT_LAMBDA[1], outlierprior=1e-1, outlierfrac=1e-2, 
                        outliercutoff=1e-2,  T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         mapping_err = self.mapping_cost(other, outlierprior, outlierfrac, outliercutoff, T, norm_iters)
         for i in range(self.N):
@@ -367,11 +369,11 @@ class GPUContext(object):
                 ipy.embed()
                 sys.exit(1)
 
-    def test_bending_cost(self, other, bend_coeff=DEFAULT_LAMBDA[1], outlierprior=1e-1, outlierfrac=1e-2, 
+    def test_bending_cost(self, other, bend_coef=DEFAULT_LAMBDA[1], outlierprior=1e-1, outlierfrac=1e-2, 
                        outliercutoff=1e-2,  T = 5e-3, norm_iters = DEFAULT_NORM_ITERS):
         self.get_target_points(other, outlierprior, outlierfrac, outliercutoff,  T, norm_iters)
-        self.update_transform(bend_coeff)
-        bending_costs = self.bending_cost(bend_coeff)
+        self.update_transform(bend_coef)
+        bending_costs = self.bending_cost(bend_coef)
         for i in range(self.N):
             c_gpu = bending_costs[i]
             k_nn = self.kernels[i].get()
@@ -381,7 +383,7 @@ class GPUContext(object):
                 r = np.dot(k_nn, w_nd[:, d]).astype(np.float32)
                 r = np.float32(np.dot(w_nd[:, d], r))
                 c_cpu += r
-            c_cpu *= np.float32(bend_coeff)
+            c_cpu *= np.float32(bend_coef)
             if np.abs(c_cpu - c_gpu) > 1e-4:
                 ## high err tolerance is b/c of difference in cpu and gpu precision?
                 print "cpu and gpu bend costs differ!!!"
@@ -436,8 +438,8 @@ class GPUContext(object):
         b_M = np.ones((m+1), dtype = np.float32)
         b_M[m] = n*outlierfrac
 
-        old_r_coeffs = np.ones(n+1, dtype=np.float32)
-        old_c_coeffs = np.ones(m+1, dtype=np.float32)
+        old_r_coefs = np.ones(n+1, dtype=np.float32)
+        old_c_coefs = np.ones(m+1, dtype=np.float32)
         for n_iter in range(1, norm_iters):
             init_prob_nm(self.pt_ptrs, other.pt_ptrs, 
                          self.pt_w_ptrs, other.pt_w_ptrs, 
@@ -447,23 +449,23 @@ class GPUContext(object):
 
             norm_prob_nm(self.corr_cm_ptrs, self.corr_rm_ptrs, 
                          self.dims_gpu, other.dims_gpu, self.N, outlierfrac, n_iter,
-                         self.r_coeff_ptrs, self.c_coeff_rn_ptrs, self.c_coeff_cn_ptrs)        
-            new_r_coeffs = a_N/init_corr.dot(old_c_coeffs[:m+1])
-            new_c_coeffs = b_M/new_r_coeffs[:n+1].dot(init_corr)
-            gpu_c_coeffs = self.c_coeffs_cn[0].get().flatten()[:m + 1].reshape(m+1)
-            gpu_r_coeffs = self.r_coeffs[0].get().flatten()[:n + 1].reshape(n+1)
-            if not np.allclose(new_r_coeffs, gpu_r_coeffs):
-                print "row coefficients don't match", n_iter
+                         self.r_coef_ptrs, self.c_coef_rn_ptrs, self.c_coef_cn_ptrs)        
+            new_r_coefs = a_N/init_corr.dot(old_c_coefs[:m+1])
+            new_c_coefs = b_M/new_r_coefs[:n+1].dot(init_corr)
+            gpu_c_coefs = self.c_coefs_cn[0].get().flatten()[:m + 1].reshape(m+1)
+            gpu_r_coefs = self.r_coefs[0].get().flatten()[:n + 1].reshape(n+1)
+            if not np.allclose(new_r_coefs, gpu_r_coefs):
+                print "row coeficients don't match", n_iter
                 ipy.embed()
                 sys.exit(1)
-            if not np.allclose(new_c_coeffs, gpu_c_coeffs):
-                print "column coefficients don't match", n_iter
+            if not np.allclose(new_c_coefs, gpu_c_coefs):
+                print "column coeficients don't match", n_iter
                 ipy.embed()
                 sys.exit(1)
-            # old_r_coeffs = gpu_r_coeffs
-            # old_c_coeffs = gpu_c_coeffs
-            old_r_coeffs = new_r_coeffs
-            old_c_coeffs = new_c_coeffs
+            # old_r_coefs = gpu_r_coefs
+            # old_c_coefs = gpu_c_coefs
+            old_r_coefs = new_r_coefs
+            old_c_coefs = new_c_coefs
             
     def test_get_targ(self, other, T = 5e-3, outlierprior=1e-1, outlierfrac=1e-2, outliercutoff=1e-2, norm_iters = DEFAULT_NORM_ITERS):
         self.transform_points()
@@ -475,11 +477,11 @@ class GPUContext(object):
                      self.corr_cm_ptrs, self.corr_rm_ptrs)
         norm_prob_nm(self.corr_cm_ptrs, self.corr_rm_ptrs, 
                      self.dims_gpu, other.dims_gpu, self.N, outlierfrac, norm_iters,
-                     self.r_coeff_ptrs, self.c_coeff_rn_ptrs, self.c_coeff_cn_ptrs)
+                     self.r_coef_ptrs, self.c_coef_rn_ptrs, self.c_coef_cn_ptrs)
         get_targ_pts(self.pt_ptrs, other.pt_ptrs,
                      self.pt_w_ptrs, other.pt_w_ptrs,
                      self.corr_cm_ptrs, self.corr_rm_ptrs,
-                     self.r_coeff_ptrs, self.c_coeff_rn_ptrs, self.c_coeff_cn_ptrs,
+                     self.r_coef_ptrs, self.c_coef_rn_ptrs, self.c_coef_cn_ptrs,
                      self.dims_gpu, other.dims_gpu, 
                      outliercutoff, self.N,
                      self.pt_t_ptrs, other.pt_t_ptrs)
@@ -493,12 +495,12 @@ class GPUContext(object):
 
         init_corr = self.corr_rm[0].get()        
         init_corr = init_corr.flatten()[:(n + 1) * (m + 1)].reshape(n+1, m+1).astype(np.float32)
-        gpu_c_cn_coeffs = self.c_coeffs_cn[0].get().flatten()[:m + 1].reshape(m+1)
-        gpu_c_rn_coeffs = self.c_coeffs_rn[0].get().flatten()[:m + 1].reshape(m+1)
-        gpu_r_coeffs = self.r_coeffs[0].get().flatten()[:n + 1].reshape(n+1)
+        gpu_c_cn_coefs = self.c_coefs_cn[0].get().flatten()[:m + 1].reshape(m+1)
+        gpu_c_rn_coefs = self.c_coefs_rn[0].get().flatten()[:m + 1].reshape(m+1)
+        gpu_r_coefs = self.r_coefs[0].get().flatten()[:n + 1].reshape(n+1)
 
-        rn_corr = (init_corr * gpu_c_rn_coeffs[None, :]) * gpu_r_coeffs[:, None]
-        cn_corr = (init_corr * gpu_c_cn_coeffs[None, :]) * gpu_r_coeffs[:, None]        
+        rn_corr = (init_corr * gpu_c_rn_coefs[None, :]) * gpu_r_coefs[:, None]
+        cn_corr = (init_corr * gpu_c_cn_coefs[None, :]) * gpu_r_coefs[:, None]        
         rn_corr = rn_corr[:n, :m]
         cn_corr = cn_corr[:n, :m]
         
@@ -539,14 +541,14 @@ class TgtContext(GPUContext):
     mapping to a single target cloud --> only allocate GPU Memory once
     """
     def __init__(self, src_ctx):
-        GPUContext.__init__(self, src_ctx.bend_coeffs)
+        GPUContext.__init__(self, src_ctx.bend_coefs)
         self.src_ctx = src_ctx
         ## just setup with 0's
         tgt_cld = np.zeros((MAX_CLD_SIZE, DATA_DIM), np.float32)
         proj_mats = dict([(b, np.zeros((MAX_CLD_SIZE + DATA_DIM + 1, MAX_CLD_SIZE), np.float32)) 
-                          for b in self.bend_coeffs])
+                          for b in self.bend_coefs])
         offset_mats = dict([(b, np.zeros((MAX_CLD_SIZE + DATA_DIM + 1, DATA_DIM), np.float32)) 
-                            for b in self.bend_coeffs])
+                            for b in self.bend_coefs])
         tgt_K = np.zeros((MAX_CLD_SIZE, MAX_CLD_SIZE), np.float32)
         for n in src_ctx.seg_names:
             name = "{}_tgt".format(n)
@@ -580,7 +582,7 @@ class TgtContext(GPUContext):
         self.pt_ptrs.fill(int(self.pts[0].gpudata))
         self.kernel_ptrs.fill(int(self.kernels[0].gpudata))
         self.dims_gpu.fill(self.dims[0])
-        for b in self.bend_coeffs:
+        for b in self.bend_coefs:
             self.proj_mat_ptrs[b].fill(int(self.proj_mats[b][0].gpudata))
             self.offset_mat_ptrs[b].fill(int(self.offset_mats[b][0].gpudata))
 
@@ -673,12 +675,12 @@ def batch_tps_rpm_bij(src_ctx, tgt_ctx, T_init = 1e-1, T_final = 5e-3,
     TODO: Fill out comment cleanly
     """
     ##TODO: add check to ensure that src_ctx and tgt_ctx are formatted properly
-    n_iter = len(src_ctx.bend_coeffs)
+    n_iter = len(src_ctx.bend_coefs)
     T_vals = loglinspace(T_init, T_final, n_iter)
 
     src_ctx.reset_tps_params()
     tgt_ctx.reset_tps_params()
-    for i, b in enumerate(src_ctx.bend_coeffs):
+    for i, b in enumerate(src_ctx.bend_coefs):
         T = T_vals[i]
         for _ in range(em_iter):
             src_ctx.transform_points()
@@ -694,7 +696,7 @@ def test_batch_tps_rpm_bij(src_ctx, tgt_ctx, T_init = 1e-1, T_final = 5e-3,
                            test_ind = 0):
     from transformations import ThinPlateSpline, set_ThinPlateSpline
     import tps
-    n_iter = len(src_ctx.bend_coeffs)
+    n_iter = len(src_ctx.bend_coefs)
     T_vals = loglinspace(T_init, T_final, n_iter)
 
     x_nd = src_ctx.pts[test_ind].get()[:src_ctx.dims[test_ind]]
@@ -707,7 +709,7 @@ def test_batch_tps_rpm_bij(src_ctx, tgt_ctx, T_init = 1e-1, T_final = 5e-3,
 
     src_ctx.reset_tps_params()
     tgt_ctx.reset_tps_params()
-    for i, b in enumerate(src_ctx.bend_coeffs):
+    for i, b in enumerate(src_ctx.bend_coefs):
         T = T_vals[i]
         for _ in range(em_iter):
             src_ctx.transform_points()
@@ -738,27 +740,27 @@ def test_batch_tps_rpm_bij(src_ctx, tgt_ctx, T_init = 1e-1, T_final = 5e-3,
             assert np.allclose(prob_nm[:n, :m], gpu_corr[:n, :m], atol=1e-5)
             prob_nm[:n, :m] = gpu_corr[:n, :m]
 
-            r_coeffs = np.ones(n+1, np.float32)
-            c_coeffs = np.ones(m+1, np.float32)
+            r_coefs = np.ones(n+1, np.float32)
+            c_coefs = np.ones(m+1, np.float32)
             a_N = np.ones((n+1),dtype = np.float32)
             a_N[n] = m*outlierfrac
             b_M = np.ones((m+1), dtype = np.float32)
             b_M[m] = n*outlierfrac
             for _ in range(DEFAULT_NORM_ITERS):
-                r_coeffs = a_N/prob_nm.dot(c_coeffs)
-                rn_c_coeffs = c_coeffs
-                c_coeffs = b_M/r_coeffs.dot(prob_nm)
-            gpu_r_coeffs = src_ctx.r_coeffs[test_ind].get()[:n+1].reshape(n+1)
-            gpu_c_coeffs_cn = src_ctx.c_coeffs_cn[test_ind].get()[:m+1].reshape(m+1)
-            gpu_c_coeffs_rn = src_ctx.c_coeffs_rn[test_ind].get()[:m+1].reshape(m+1)
-            assert np.allclose(r_coeffs, gpu_r_coeffs, atol=1e-5)
-            assert np.allclose(c_coeffs, gpu_c_coeffs_cn, atol=1e-5)
-            assert np.allclose(rn_c_coeffs, gpu_c_coeffs_rn, atol=1e-5)
+                r_coefs = a_N/prob_nm.dot(c_coefs)
+                rn_c_coefs = c_coefs
+                c_coefs = b_M/r_coefs.dot(prob_nm)
+            gpu_r_coefs = src_ctx.r_coefs[test_ind].get()[:n+1].reshape(n+1)
+            gpu_c_coefs_cn = src_ctx.c_coefs_cn[test_ind].get()[:m+1].reshape(m+1)
+            gpu_c_coefs_rn = src_ctx.c_coefs_rn[test_ind].get()[:m+1].reshape(m+1)
+            assert np.allclose(r_coefs, gpu_r_coefs, atol=1e-5)
+            assert np.allclose(c_coefs, gpu_c_coefs_cn, atol=1e-5)
+            assert np.allclose(rn_c_coefs, gpu_c_coefs_rn, atol=1e-5)
             
             prob_nm = prob_nm[:n, :m]
-            prob_nm *= gpu_r_coeffs[:n, None]
-            rn_p_nm = prob_nm * gpu_c_coeffs_rn[None, :m]
-            cn_p_nm = prob_nm * gpu_c_coeffs_cn[None, :m]
+            prob_nm *= gpu_r_coefs[:n, None]
+            rn_p_nm = prob_nm * gpu_c_coefs_rn[None, :m]
+            cn_p_nm = prob_nm * gpu_c_coefs_cn[None, :m]
 
             wt_n = rn_p_nm.sum(axis=1)
             gpu_corr_cm = src_ctx.corr_cm[test_ind].get().flatten()[:(n+1)*(m+1)]

@@ -200,7 +200,7 @@ def tps_fit(x_na, y_ng, bend_coef, rot_coef, wt_n=None, K_nn = None):
     
 
 
-    
+# @profile    x
 def solve_eqp1(H, f, A):
     """solve equality-constrained qp
     min tr(x'Hx) + sum(f'x)
@@ -220,11 +220,13 @@ def solve_eqp1(H, f, A):
     # x = Nz
     # then problem becomes unconstrained minimization .5*z'NHNz + z'Nf
     # NHNz + Nf = 0
-    z = np.linalg.solve(N.T.dot(H.dot(N)), -N.T.dot(f))
+    L = N.T.dot(H.dot(N))
+    R = -N.T.dot(f)
+    z = np.linalg.solve(L, R)
     x = N.dot(z)
     
     return x
-    
+# @profile
 def tps_fit3(x_na, y_ng, bend_coef, rot_coef, wt_n):
     if wt_n is None: wt_n = np.ones(len(x_na))
     n,d = x_na.shape
